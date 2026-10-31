@@ -14,7 +14,7 @@ services:
       - key: FINN_ADMIN_TOKEN
         generateValue: true
       - key: FINN_ENABLE_HOST_CHECK
-        value: "1"
+        value: "0"   # set to "1" only while running the host check, then back to "0"
       - key: FINN_LLM_BASE_URL
         value: https://api.groq.com/openai/v1
       - key: FINN_LLM_MODEL

@@ -37,3 +37,28 @@ Checked by rendering the pages from the PDFs and reading them. Mechanical checks
 ## Not tested
 - NSE from Render (all of it); BSE API cause; Groq with the fixed retrieval; any other company or transcript; long-run stability; free-instance cold start time (host check ran on an already-awake instance).
 - Cached answers are still operator-written. The live Q2 answer is a correct model answer and could be promoted (`scripts/promote_to_snapshot.py`); the live Q1 answer should NOT be promoted as is.
+
+---
+# Update: clean re-run after fixes (commit f6c084d, 16:46 UTC)
+
+## Works from Render
+- Yahoo (3 symbols), Screener, BSE concall PDF (20/20 pages identical to snapshot), BSE annual report headers, snapshot integrity.
+- Groq: both requests live, no fallback. Q1 1.07 s / 1,545 tokens; Q2 1.3 s / 2,016 tokens (2 attempts: a retry happened, reason not recorded).
+- NSE announcements API: works (HTTP 200 lists) but **about 20 s per call**. RELIANCE 8 filings, KPITTECH 10 filings in 7 days. The page warm-up (cookies) timed out every time and was not needed.
+- **TCS: `valid_empty_window`** from Render. 0 filings in 7 days, 45 in 90 days, newest 19-Oct-2026. Earlier run: uppercase TCS 30-day query returned 19 filings; the market-wide window had 4,631 records and no TCS rows.
+
+## Fails / untested
+- BSE announcements API: 403 (third time). NSE attachment PDF (nsearchives.nseindia.com): timed out at 45 s in the earlier run; not retried (budget).
+- Lowercase `tcs` control from Render: non-list result, reason not recorded in that run (logging added; not re-run, NSE time budget was spent).
+- Untested: a second company's transcript; ranking quality beyond one transcript; cold-start time.
+
+## Manual check of the new Q1 answer (all quotes confirmed on the PDF pages)
+- "H2 will be better than H1" / "return to growth in H2 by Q4": PDF p4 (printed p3), Kishor Patil, Co-Founder, CEO and MD (introduced on PDF p3). Correct.
+- "margins will improve incrementally, not significantly until revenues go back to growing ways": PDF p9, Kishor Patil. Correct.
+- "Qorix loss will continue for at least next quarter or two": PDF p9, same turn. Correct.
+- Speaker labels on all four passages are now Kishor Patil (management), which is right.
+- Incomplete: it omits commercial-vehicle growth next quarter and the medium-term outlook that retrieval did return (S2). No numeric guidance exists in these passages; the answer says none is given as a number, which is consistent.
+- Q2 re-check: identical answer to the first run; all 4 claims correct (see above). Missing unit (₹ million) and word "consolidated".
+
+## Host check disabled in repo
+`render.yaml` now sets FINN_ENABLE_HOST_CHECK to "0". After push and deploy, /admin routes return 404.
