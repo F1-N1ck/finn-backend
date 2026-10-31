@@ -101,3 +101,23 @@ def test_failure_while_widening_is_reported_not_called_valid():
 def test_bad_symbols_rejected(bad):
     with pytest.raises(ValueError):
         nse.normalise_symbol(bad)
+
+
+def test_host_check_nse_records_timeout_stage_without_raising(monkeypatch):
+    from finn import hostcheck
+
+    class TimeoutSession:
+        def __init__(self):
+            self.headers = {}
+            self.cookies = {}
+
+        def get(self, url, params=None, timeout=None):
+            raise requests.exceptions.ReadTimeout("read timed out")
+
+    monkeypatch.setattr(hostcheck.requests, "Session", TimeoutSession)
+    info = hostcheck.check_nse()
+    assert info["ok"] is False
+    assert "ReadTimeout" in info["stages"]["page_warmup"]["error"]
+    assert "page_warmup_retry" in info["stages"]
+    assert info["stages"]["api_probe"]["ok"] is False
+    assert info["symbols"] == {}

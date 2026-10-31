@@ -38,6 +38,11 @@ def _strip_headers(pages):
     repeated = set()
     for line in counts:
         if counts[line] >= limit and len(pages) >= 5:
+            # A speaker label ("Kishor Patil:") can repeat on most pages because that person
+            # talks a lot. It is NOT a page header; deleting it merges turns and misattributes
+            # quotes (found in the Render host-check review).
+            if SPEAKER_RE.match(line) and len(line.split()) <= 5:
+                continue
             repeated.add(line)
     cleaned = []
     for page in pages:

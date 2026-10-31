@@ -218,3 +218,21 @@ def test_admin_starts_job_and_second_start_is_throttled(monkeypatch):
     assert SECRET not in poll.text and ADMIN not in poll.text
     again = client.post("/admin/host-check", headers=headers)
     assert again.status_code == 429
+
+
+# ------------------------------------------------------------ retrieval regression
+
+def test_frequent_speaker_label_is_not_stripped_as_header():
+    from finn import retrieval
+    pages = []
+    for number in range(1, 7):
+        text = ("KPIT Technologies Limited\nJuly 29, 2026\nPage " + str(number) + " of 6\n"
+                "Kishor Patil:\nWe will return to growth in H2 on page " + str(number) + ".\n"
+                "Analyst One:\nQuestion on page " + str(number) + "?\n")
+        pages.append({"page": number, "text": text})
+    turns = retrieval.split_turns(pages)
+    speakers = [t["speaker"] for t in turns]
+    assert speakers.count("Kishor Patil") == 6
+    assert speakers.count("Analyst One") == 6
+    for turn in turns:
+        assert "KPIT Technologies Limited" not in turn["text"]

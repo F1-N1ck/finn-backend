@@ -54,33 +54,74 @@ def check_yahoo(symbol):
     return timed(run)
 
 
+def _stage(function):
+    """Run one small step; never raise. Records seconds and the error TYPE only."""
+    started = time.time()
+    try:
+        outcome = function()
+    except Exception as error:
+        outcome = {"ok": False, "error": type(error).__name__ + ": " + str(error)[:120]}
+    outcome["seconds"] = round(time.time() - started, 2)
+    return outcome
+
+
 def check_nse():
-    def run():
-        session = nse.make_session()
-        info = {"symbols": {}}
-        attachment = None
-        for symbol in ("RELIANCE", "KPITTECH", "TCS"):
-            verdict = nse.classify_window(session, symbol, window_days=7)
-            items = verdict.pop("items", None)
-            if items and attachment is None and items[0].get("attchmntFile"):
-                attachment = items[0]["attchmntFile"]
-                verdict["sample_desc"] = items[0].get("desc")
-            info["symbols"][symbol] = verdict
-        # invalid-symbol controls: show that [] alone is ambiguous
-        info["controls"] = {
-            "lowercase_tcs": nse.fetch(session, "tcs", datetime.now(), datetime.now())["kind"],
-        }
-        lower = nse.fetch(session, "tcs", datetime.fromtimestamp(time.time() - 30 * 86400), datetime.now())
-        info["controls"]["lowercase_tcs_30d_count"] = len(lower["items"]) if lower["items"] is not None else None
-        upper = nse.fetch(session, "TCS", datetime.fromtimestamp(time.time() - 30 * 86400), datetime.now())
-        info["controls"]["uppercase_TCS_30d_count"] = len(upper["items"]) if upper["items"] is not None else None
-        info["tcs_market_wide"] = nse.symbol_in_market_window(session, "TCS", window_days=7)
-        if attachment:
-            pdf = session.get(attachment, timeout=60)
-            info["attachment"] = {"status": pdf.status_code, "magic": pdf.content[:5].decode("latin-1"),
-                                  "bytes": len(pdf.content)}
+    """Stage by stage, so a timeout says WHERE it happened (page warm-up vs API vs attachment)."""
+    info = {"stages": {}, "symbols": {}}
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    def warm_up():
+        response = session.get(nse.PAGE_URL, timeout=20)
+        return {"ok": response.status_code == 200, "status": response.status_code,
+                "cookies_set": len(session.cookies)}
+
+    info["stages"]["page_warmup"] = _stage(warm_up)
+    if not info["stages"]["page_warmup"]["ok"]:
+        info["stages"]["page_warmup_retry"] = _stage(warm_up)
+
+    def api_probe():
+        result = nse.fetch(session, "RELIANCE", datetime.now(), datetime.now())
+        return {"ok": result["kind"] == "list", "kind": result["kind"], "status": result["status"],
+                "error": result["error"]}
+
+    info["stages"]["api_probe"] = _stage(api_probe)
+    if not info["stages"]["api_probe"]["ok"]:
+        info["ok"] = False
+        info["note"] = "NSE API unreachable from this host; remaining NSE steps skipped"
         return info
-    return timed(run)
+
+    attachment = None
+    for symbol in ("RELIANCE", "KPITTECH", "TCS"):
+        def classify(symbol=symbol):
+            verdict = nse.classify_window(session, symbol, window_days=7)
+            verdict["ok"] = verdict.get("verdict") in ("ok_nonempty", "valid_empty_window")
+            return verdict
+        verdict = _stage(classify)
+        items = verdict.pop("items", None)
+        if items and attachment is None and items[0].get("attchmntFile"):
+            attachment = items[0]["attchmntFile"]
+            verdict["sample_desc"] = items[0].get("desc")
+        info["symbols"][symbol] = verdict
+
+    def controls():
+        now = datetime.now()
+        month_ago = datetime.fromtimestamp(time.time() - 30 * 86400)
+        lower = nse.fetch(session, "tcs", month_ago, now)
+        upper = nse.fetch(session, "TCS", month_ago, now)
+        return {"lowercase_tcs_30d_count": len(lower["items"]) if lower["items"] is not None else None,
+                "uppercase_TCS_30d_count": len(upper["items"]) if upper["items"] is not None else None}
+
+    info["controls"] = _stage(controls)
+    info["tcs_market_wide"] = _stage(lambda: nse.symbol_in_market_window(session, "TCS", window_days=7))
+
+    if attachment:
+        def download():
+            pdf = session.get(attachment, timeout=45)
+            return {"status": pdf.status_code, "magic": pdf.content[:5].decode("latin-1"), "bytes": len(pdf.content)}
+        info["attachment"] = _stage(download)
+    info["ok"] = all(info["symbols"][name].get("ok") for name in info["symbols"])
+    return info
 
 
 def check_screener():
