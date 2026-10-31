@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+data/pdfs/
+*.pyc
+results/
+.pytest_cache/
+data/text/

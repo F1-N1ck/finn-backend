@@ -1,0 +1,33 @@
+# Render Blueprint. Secrets use sync: false (Render asks for them in the Dashboard; they are NOT in git).
+services:
+  - type: web
+    name: finn-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      - key: FINN_LLM_API_KEY
+        sync: false
+      - key: FINN_ADMIN_TOKEN
+        generateValue: true
+      - key: FINN_ENABLE_HOST_CHECK
+        value: "1"
+      - key: FINN_LLM_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: FINN_LLM_MODEL
+        value: qwen/qwen3.8-27b
+      - key: FINN_LLM_EXTRA_BODY
+        value: '{"reasoning_effort":"none"}'
+      - key: FINN_LLM_TIMEOUT_S
+        value: "30"
+      - key: FINN_LLM_MAX_RETRIES
+        value: "1"
+      - key: FINN_LLM_MAX_TOKENS
+        value: "700"
+      - key: FINN_LIVE_MAX_PER_MIN
+        value: "2"
+      - key: FINN_LIVE_MAX_PER_DAY
+        value: "40"

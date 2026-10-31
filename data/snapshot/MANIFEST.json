@@ -1,0 +1,18 @@
+{
+  "retrieved": "2026-10-31",
+  "note": "Public filings from BSE; text extracted with PyMuPDF.",
+  "files": {
+    "text/KPIT_CONCALL_AUG2026.pages.jsonl": {
+      "sha256": "d345e6a1a76326473cb4e586ea109f3a2f2a4740ccfdf01bf4858ea81356a67a",
+      "pages": 20,
+      "source_url": "https://www.bseindia.com/stockinfo/AnnPdfOpen.aspx?Pname=d07f9c52-5c5a-443b-b239-6acd5e94b97a.pdf",
+      "kind": "concall"
+    },
+    "text/KPIT_AR_2026.pages.jsonl": {
+      "sha256": "1b15b0add6a2267c690edd497e6f496efc80077fa3887edb7bee4a0b2e224593",
+      "pages": 210,
+      "source_url": "https://www.bseindia.com/xml-data/corpfiling/AttachHis/4d2467e3-e28a-472b-8492-7fd9e46e63c4.pdf",
+      "kind": "annual_report"
+    }
+  }
+}

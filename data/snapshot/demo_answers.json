@@ -1,0 +1,103 @@
+{
+  "KPIT_AR_2026|Q2_ar_headline_numbers": {
+    "source_type": "operator_extract",
+    "model": null,
+    "generated_at": "2026-10-31",
+    "verification": "mechanical check + manual read by Claude on 2026-10-31 against the cited page text; no human review",
+    "result": {
+      "answer": "Consolidated, year ended 31 March 2026 (Rs million): revenue from operations 64,549.31 (prior year 58,423.45); profit for the year 6,373.70 (prior year 8,396.00).",
+      "not_stated": false,
+      "claims": [
+        {
+          "text": "Consolidated revenue from operations: 64,549.31 (year ended 31 March 2026) vs 58,423.45 (prior year), Rs million.",
+          "source": "S1",
+          "quote": "Revenue from operations 35 64,549.31 58,423.45"
+        },
+        {
+          "text": "Consolidated profit for the year: 6,373.70 (year ended 31 March 2026) vs 8,396.00 (prior year), Rs million.",
+          "source": "S1",
+          "quote": "Profit for the year 6,373.70 8,396.00"
+        },
+        {
+          "text": "The page is the consolidated statement of profit and loss.",
+          "source": "S1",
+          "quote": "CONSOLIDATED STATEMENT OF PROFIT AND LOSS"
+        }
+      ]
+    },
+    "passages": [
+      {
+        "source_id": "S1",
+        "page": 149,
+        "char_start": 0,
+        "text": "Financial Statements\n294\nAnnual Report 2025-26\n(Amount in ` million)\nParticulars\nNote\nFor the \nyear ended \n31 March 2026 \nFor the \n year ended \n31 March 2025\nRevenue from operations\n35\n 64,549.31 \n 58,423.45 \nOther income\n36\n 857.38 \n 1,673.22 \nTotal income\n 65,406.69 \n 60,096.67 \nExpenses\nCost of materials consumed\n37\n 965.98 \n 487.64 \nChanges in inventories of finished goods and work-in-progress\n38\n (58.33)\n 70.00 \nEmployee benefits expense\n39\n 39,960.81 \n 36,992.71 \nFinance costs\n40\n 736.71 \n 423.92 \nDepreciation and amortisation expense\n41\n 3,005.55 \n 2,249.60 \nOther expenses\n42\n 11,102.55 \n 8,575.35 \nTotal expenses\n 55,713.27 \n 48,799.22 \nProfit before share of profit/(loss) of joint venture and associate, exceptional \nitems and tax\n 9,693.42 \n 11,297.45 \nShare of profit/(loss) of joint venture and associate (net of tax)\n10\n (375.68)\n 28.02 \nProfit before exceptional items and tax\n 9,317.74 \n 11,325.47 \nExceptional items\n48\n 597.12 \n - \nProfit before tax\n 8,720.62 \n 11,325.47 \nTax expense\n51\nCurrent tax \n 2,984.02 \n 3,093.13 \nDeferred tax\n (637.10)\n (163.66)\nTotal tax expense\n 2,346.92 \n 2,929.47 \nProfit for the year\n 6,373.70 \n 8,396.00 \nOther comprehensive income (OCI)\nA. \nItems that will not be reclassified to profit or loss\n(i) \nRemeasurements of defined benefit plans - gain/(loss)\n49\n 82.52 \n (27.28)\n(ii) Share of other comprehensive income in joint venture (net of tax)\n 2.51 \n - \n(iii) Income tax on items that will not be reclassified to profit or loss\n51\n (27.10)\n 9.76 \nB. \nItems that will be reclassified to profit or loss\n(i) \n Exchange differences on translation of financial statements of foreign \noperations\n 3,431.68 \n 413.34 \n(ii)  Effective portion of gains/(loss) on hedging instruments in cash flow \nhedges\n43\n (605.92)\n (75.40)\n(iii) Income tax on items that will be reclassified to profit or loss\n51\n 158.23 \n 26.35 \nTotal other comprehensive income/(loss) for the year, net of tax\n 3,041.92 \n 346.77 \nTotal comprehensive income for the year\n 9,415.62 \n 8,742.77 \nCONSOLIDATED STATEMENT OF PROFIT AND LOSS\nFinancial Statements\nAnnual Report 2025-26\n295\nCONSOLIDATED STATEMENT OF PROFIT AND LOSS (Cont.)\n(Amount in ` million)\nParticulars\nNote\nFor the \nyear ended \n31 March 2026 \nFor the \n year ended \n31 March 2025\nProfit for the year attributable to\n \nOwners of the Company\n 6,373.39 \n 8,396.00 \nNon-controlling interests\n25\n 0.31 \n - \n 6,373.70 \n 8,396.00 \nOther comprehensive income/(loss) for the year attributable to\nOwners of the Company\n 3,041.92 \n 346.77 \nNon-controlling interests\n25\n - \n - \n 3,041.92 \n 346.77 \nTotal comprehensive income for the year attributable to\nOwners of the Company\n 9,415.31 \n 8,742.77 \nNon-controlling interests\n25\n 0.31 \n - \n 9,415.62 \n 8,742.77 \nEarnings per equity share (face value per share \u20b9 10 each)\n52\nBasic (`)\n 23.43 \n 30.93 \nDiluted (`) \n 23.28 \n 30.70 \nSee accompanying notes to the consolidated financial statements\nAs per our report of even date attached\nFor B S R & Co. LLP\nFor and on behalf of the Board of Directors of\nChartered Accountants \nKPIT TECHNOLOGIES LIMITED\nFirm Registration Number: 101248W/W-100022 \nCIN: L74999PN2018PLC174192 \nShiraz Vastani \n Kishor Patil \nSachin Tikekar\nPartner \n CEO & Managing Director \nPresident & Joint Managing Director\nMembership No. 103334\n DIN : 00076190 \nDIN: 02918460\nPriyamvada Hardikar\nAshish Malhotra\nChief Financial Officer\nGeneral Counsel & Company Secretary\nPlace: Pune\nPlace: Pune\n   \nDate: 6 May 2026\nDate: 6 May 2026\n   \n"
+      }
+    ]
+  },
+  "KPIT_CONCALL_AUG2026|Q1_concall_guidance": {
+    "source_type": "operator_extract",
+    "model": null,
+    "generated_at": "2026-10-31",
+    "verification": "mechanical check + manual read by Claude on 2026-10-31 against the cited page text; no human review",
+    "result": {
+      "answer": "Guidance in these passages is qualitative: H2 better than H1 with a return to growth by Q4; margins improve only incrementally until revenue grows; commercial vehicle growth next quarter; medium-term outlook remains good. No new numeric growth or margin figure is given in these passages.",
+      "not_stated": false,
+      "claims": [
+        {
+          "text": "Management said H2 will be better than H1 and the company will return to growth in H2 by Q4.",
+          "source": "S1",
+          "quote": "we have just mentioned that H2 will be better than H1, and we will return to growth in H2 by Q4"
+        },
+        {
+          "text": "Margins will improve incrementally, not significantly, until revenues return to growth.",
+          "source": "S2",
+          "quote": "the margins will improve, but it will improve incrementally, not significantly until our revenues go back to growing ways"
+        },
+        {
+          "text": "Commercial vehicle revenue is expected to grow next quarter.",
+          "source": "S3",
+          "quote": "On the commercial vehicle, we will be on for growth next quarter"
+        },
+        {
+          "text": "Management said the medium-term outlook remains good.",
+          "source": "S4",
+          "quote": "the medium-term outlook remains good"
+        }
+      ]
+    },
+    "passages": [
+      {
+        "source_id": "S1",
+        "page": 4,
+        "char_start": 1210,
+        "text": " on the PAT. On the back of that, what was still good was KPIT could do USD 257 million worth wins during the quarter, which was across the world, but mainly driven through connected cars , then after sales transformation and autonomous. So these were some of the few leading areas which helped us to get these revenues. I think these are the 2 things which we have mentioned about. Of course, this is not where we have been in the past, and we would like to come back to growth. During the outlook, we have just mentioned that H2 will be better than H1, and we will return to growth in H2 by Q4, driven by the Q4 performance and our profitability will return largely when the revenues come. Of course, there are other levers we will use before that. So. this is where we are. Now the point is, how we will do it. And we have talked about some multiple areas which could help us get there. Now I may say that this is not merely a response to the current situation. We have been working at it for the last many months, even during the last year. Now the issue is about how quickly we can do that.",
+        "speaker": "Kishor Patil",
+        "role": "management"
+      },
+      {
+        "source_id": "S2",
+        "page": 9,
+        "char_start": 1094,
+        "text": "pect the margin trajectory from here on for like the next three quarters? Priya Hardikar: So, in terms of other expenses, there has been a certain impact because of the foreign exchange rate. As you know, these are consolidated accounts. So, secondly, there have been some provision because of the acquisitions that we did and some subcontracting cost in European region that incurred for our clients. Nothing out of the way. These are operational. Kishor Patil: So, going forward, the way we see is the margins will improve, but it will improve incrementally, not significantly until our revenues go back to growing ways. So revenue will be the major driver. We will be in a position to optimize cost but only incrementally. So that is point number one. The second is the Qorix loss, which we said, I think it will continue for at least next quarter or two that we believe thats how it will be. So mainly the driver will be the revenue coming back. Karan Uppal: Okay. Thanks a lot and all the best. Kishor Patil: Thank you. Moderator: Thank you. The next question is from the line of Chandramouli from Goldman Sachs. Ple",
+        "speaker": "Kishor Patil",
+        "role": "management"
+      },
+      {
+        "source_id": "S3",
+        "page": 7,
+        "char_start": 943,
+        "text": "selves. So they look at KPIT as a natural partner. So we are engaged with all the OEMs you are talking about. That's the reason our pipeline is also strong. What we are not sure in the case of the current part is when these deals will realize. We are not at all worried in the sense, whether we would get our share of the business. It is about the timing. And that's why at least in the short term, we have discounted that part, at least for a few quarters. And that's why we have said what we have. On the commercial vehicle, we will be on for growth next quarter. Actually, this quarter also, there was one specific thing what has happened was a quarter before we had one significant revenue in a particular place. So that's why this looks like this, but I think you will see a growth next quarter. Nitin Padmanabhan: Sure. Perfect. And lastly, on the margins. During the Analyst Day, you spoke about an aspiration of achieving 22% to 24% by FY '29. That aspiration can still hold? Or would you worry about it at the moment? Kishor Patil: I would say the medium-",
+        "speaker": "Kishor Patil",
+        "role": "management"
+      },
+      {
+        "source_id": "S4",
+        "page": 7,
+        "char_start": 1496,
+        "text": "ext quarter. Actually, this quarter also, there was one specific thing what has happened was a quarter before we had one significant revenue in a particular place. So that's why this looks like this, but I think you will see a growth next quarter. Nitin Padmanabhan: Sure. Perfect. And lastly, on the margins. During the Analyst Day, you spoke about an aspiration of achieving 22% to 24% by FY '29. That aspiration can still hold? Or would you worry about it at the moment? Kishor Patil: I would say the medium-term outlook remains good for two, three reasons. I will not just make a statement. There are two, three things. As I said, we believe that our product revenues will grow and the solutions revenue will grow exponentially. I would say that we have had a reasonable success till date. It is not that we have not started. We have already seen the success in some areas. In solutions, there are many solutions we have identified. Some of them are in the initial stages. We believe in the next quarter or two, they will also be re",
+        "speaker": "Kishor Patil",
+        "role": "management"
+      }
+    ]
+  }
+}
