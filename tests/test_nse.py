@@ -118,6 +118,23 @@ def test_host_check_nse_records_timeout_stage_without_raising(monkeypatch):
     info = hostcheck.check_nse()
     assert info["ok"] is False
     assert "ReadTimeout" in info["stages"]["page_warmup"]["error"]
-    assert "page_warmup_retry" in info["stages"]
     assert info["stages"]["api_probe"]["ok"] is False
     assert info["symbols"] == {}
+
+
+def test_host_check_nse_skips_later_stages_when_budget_spent(monkeypatch):
+    from finn import hostcheck
+
+    class SlowOkSession:
+        def __init__(self):
+            self.headers = {}
+            self.cookies = {}
+
+        def get(self, url, params=None, timeout=None):
+            return FakeResponse(200, [])
+
+    monkeypatch.setattr(hostcheck.requests, "Session", SlowOkSession)
+    info = hostcheck.check_nse(budget_s=-1)  # budget already spent
+    assert info["symbols"]["TCS"]["skipped"] == "nse time budget spent"
+    assert info["controls"]["skipped"] == "nse time budget spent"
+    assert info["tcs_market_wide"]["skipped"] == "nse time budget spent"

@@ -65,8 +65,15 @@ def _stage(function):
     return outcome
 
 
-def check_nse():
-    """Stage by stage, so a timeout says WHERE it happened (page warm-up vs API vs attachment)."""
+def check_nse(budget_s=110):
+    """Stage by stage, so a timeout says WHERE it happened (page warm-up vs API vs attachment).
+    NSE answers slowly from this host (about 20 s per API call), so the whole step has its own
+    time budget and runs LAST; later stages are skipped (and say so) when the budget is spent."""
+    started_at = time.time()
+
+    def over_budget():
+        return time.time() - started_at > budget_s
+
     info = {"stages": {}, "symbols": {}}
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -77,8 +84,6 @@ def check_nse():
                 "cookies_set": len(session.cookies)}
 
     info["stages"]["page_warmup"] = _stage(warm_up)
-    if not info["stages"]["page_warmup"]["ok"]:
-        info["stages"]["page_warmup_retry"] = _stage(warm_up)
 
     def api_probe():
         result = nse.fetch(session, "RELIANCE", datetime.now(), datetime.now())
@@ -92,7 +97,11 @@ def check_nse():
         return info
 
     attachment = None
-    for symbol in ("RELIANCE", "KPITTECH", "TCS"):
+    for symbol in ("TCS", "KPITTECH", "RELIANCE"):
+        if over_budget():
+            info["symbols"][symbol] = {"ok": False, "skipped": "nse time budget spent"}
+            continue
+
         def classify(symbol=symbol):
             verdict = nse.classify_window(session, symbol, window_days=7)
             verdict["ok"] = verdict.get("verdict") in ("ok_nonempty", "valid_empty_window")
@@ -109,18 +118,29 @@ def check_nse():
         month_ago = datetime.fromtimestamp(time.time() - 30 * 86400)
         lower = nse.fetch(session, "tcs", month_ago, now)
         upper = nse.fetch(session, "TCS", month_ago, now)
-        return {"lowercase_tcs_30d_count": len(lower["items"]) if lower["items"] is not None else None,
-                "uppercase_TCS_30d_count": len(upper["items"]) if upper["items"] is not None else None}
+        return {"lowercase_tcs": {"kind": lower["kind"], "error": lower["error"],
+                                  "count": len(lower["items"]) if lower["items"] is not None else None},
+                "uppercase_TCS": {"kind": upper["kind"], "error": upper["error"],
+                                  "count": len(upper["items"]) if upper["items"] is not None else None}}
 
-    info["controls"] = _stage(controls)
-    info["tcs_market_wide"] = _stage(lambda: nse.symbol_in_market_window(session, "TCS", window_days=7))
+    if over_budget():
+        info["controls"] = {"ok": False, "skipped": "nse time budget spent"}
+    else:
+        info["controls"] = _stage(controls)
+    if over_budget():
+        info["tcs_market_wide"] = {"ok": False, "skipped": "nse time budget spent"}
+    else:
+        info["tcs_market_wide"] = _stage(lambda: nse.symbol_in_market_window(session, "TCS", window_days=7))
 
-    if attachment:
+    if attachment and over_budget():
+        info["attachment"] = {"ok": False, "skipped": "nse time budget spent"}
+    elif attachment:
         def download():
             pdf = session.get(attachment, timeout=45)
             return {"status": pdf.status_code, "magic": pdf.content[:5].decode("latin-1"), "bytes": len(pdf.content)}
         info["attachment"] = _stage(download)
     info["ok"] = all(info["symbols"][name].get("ok") for name in info["symbols"])
+    info["total_seconds"] = round(time.time() - started_at, 1)
     return info
 
 
@@ -205,7 +225,7 @@ def check_model(config, directory, cache_path):
     return info
 
 
-def run_all(include_model, config, directory, cache_path, deadline_s=240):
+def run_all(include_model, config, directory, cache_path, deadline_s=280):
     started = time.time()
     report = {
         "host": {"node": socket.gethostname(), "platform": platform.platform(),
@@ -218,8 +238,8 @@ def run_all(include_model, config, directory, cache_path, deadline_s=240):
         return deadline_s - (time.time() - started)
 
     steps = [("yahoo", lambda: {s: check_yahoo(s) for s in ("RELIANCE.NS", "TCS.NS", "KPITTECH.NS")}),
-             ("nse", check_nse), ("screener", check_screener),
-             ("bse_pdf", lambda: check_pdf(directory)), ("bse_announcements_api", check_bse_api)]
+             ("screener", check_screener), ("bse_pdf", lambda: check_pdf(directory)),
+             ("bse_announcements_api", check_bse_api)]
     for name, function in steps:
         if remaining() <= 0:
             report[name] = {"ok": False, "error": "skipped: host check deadline reached"}
@@ -227,5 +247,10 @@ def run_all(include_model, config, directory, cache_path, deadline_s=240):
         report[name] = function()
     if include_model:
         report["hosted_model"] = check_model(config, directory, cache_path) if remaining() > 0 else {"skipped": "deadline"}
+    # NSE last: it is the slow one (about 20 s per call from the free host)
+    if remaining() > 30:
+        report["nse"] = check_nse(budget_s=min(110, remaining() - 15))
+    else:
+        report["nse"] = {"ok": False, "error": "skipped: host check deadline reached"}
     report["total_seconds"] = round(time.time() - started, 1)
     return report
