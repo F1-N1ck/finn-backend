@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f766e">
+  <meta name="color-scheme" content="light dark">
+  <title>FINN</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">F</span>
+      <div>
+        <h1>FINN</h1>
+        <p class="tagline">Your portfolio, from primary sources</p>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section id="tab-digest" class="tab" role="tabpanel" aria-labelledby="btn-digest">
+      <div id="status" class="status" role="status">Loading digest…</div>
+
+      <div class="card controls">
+        <div class="row">
+          <span class="label">Window</span>
+          <div class="seg" id="window-seg" role="group" aria-label="Digest window">
+            <button type="button" data-hours="24" class="on">24h</button>
+            <button type="button" data-hours="72">3 days</button>
+            <button type="button" data-hours="168">7 days</button>
+          </div>
+        </div>
+        <div class="row">
+          <label class="label" for="vol-input">Volume alert at</label>
+          <div class="stepper">
+            <button type="button" id="vol-minus" aria-label="Lower volume threshold">−</button>
+            <output id="vol-out">2.0×</output>
+            <button type="button" id="vol-plus" aria-label="Raise volume threshold">+</button>
+          </div>
+        </div>
+        <div class="row">
+          <span class="label">Price move alert at</span>
+          <div class="stepper">
+            <button type="button" id="move-minus" aria-label="Lower move threshold">−</button>
+            <output id="move-out">±3%</output>
+            <button type="button" id="move-plus" aria-label="Raise move threshold">+</button>
+          </div>
+        </div>
+        <div class="row">
+          <button type="button" id="refresh-btn" class="btn secondary">Refresh prices (live)</button>
+          <span id="refresh-note" class="hint"></span>
+        </div>
+      </div>
+
+      <h2 class="section">Alerts <span id="alert-count" class="count"></span></h2>
+      <div id="alerts" class="stack"></div>
+
+      <h2 class="section">Filings <span id="filing-count" class="count"></span></h2>
+      <div id="filings" class="stack"></div>
+
+      <h2 class="section">Portfolio <span class="count">16 stocks</span></h2>
+      <div id="portfolio" class="card list"></div>
+
+      <p class="foot">Demo portfolio chosen by the builder. Rule-based tiers, no model. Not investment advice.</p>
+    </section>
+
+    <section id="tab-research" class="tab" role="tabpanel" aria-labelledby="btn-research" hidden>
+      <div class="card">
+        <p class="hint">Answers use only the loaded primary documents. Demo documents exist for <strong>KPITTECH</strong> only.</p>
+        <div id="questions" class="stack"></div>
+        <div class="row">
+          <span class="label">Mode</span>
+          <div class="seg" id="mode-seg" role="group" aria-label="Answer mode">
+            <button type="button" data-mode="cached" class="on">Cached</button>
+            <button type="button" data-mode="live">Live (Groq)</button>
+          </div>
+        </div>
+        <button type="button" id="run-btn" class="btn" disabled>Choose a question</button>
+      </div>
+      <div id="result" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <div id="sheet" class="sheet" hidden>
+    <div class="sheet-body" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+      <div class="sheet-head">
+        <h3 id="sheet-title"></h3>
+        <button type="button" id="sheet-close" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+      <div id="sheet-content"></div>
+    </div>
+  </div>
+
+  <nav class="tabbar" aria-label="Sections">
+    <button type="button" id="btn-digest" class="on" data-tab="digest" role="tab" aria-selected="true">
+      <span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg></span>Digest
+    </button>
+    <button type="button" id="btn-research" data-tab="research" role="tab" aria-selected="false">
+      <span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg></span>Research
+    </button>
+  </nav>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

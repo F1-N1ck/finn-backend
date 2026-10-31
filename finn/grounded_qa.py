@@ -24,6 +24,8 @@ QUESTIONS = [
     {
         "id": "Q1_concall_guidance",
         "doc": "KPIT_CONCALL_AUG2026",
+        "symbol": "KPITTECH",
+        "short": "Forward guidance (Q1 FY27 concall)",
         "question": "What explicit forward guidance did management give on revenue growth or margins? "
                     "If none is stated in the passages, say so.",
         "mode": "turns",
@@ -32,6 +34,8 @@ QUESTIONS = [
     {
         "id": "Q2_ar_headline_numbers",
         "doc": "KPIT_AR_2026",
+        "symbol": "KPITTECH",
+        "short": "Headline numbers (Annual Report FY26)",
         "question": "What were revenue from operations and profit for the year in the consolidated "
                     "statement of profit and loss, and for which year? Use only numbers in the passages.",
         "mode": "required_phrases",

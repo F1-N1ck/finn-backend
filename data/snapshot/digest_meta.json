@@ -1,0 +1,22 @@
+{
+  "announcements": {
+    "source": "NSE corporate-announcements API (index=equities), one call per symbol",
+    "window": "25-10-2026 to 31-10-2026",
+    "fetched_utc": "2026-10-31T18:17:41Z",
+    "fetched_via": "browser pane on the user's Mac (not from Render)",
+    "per_symbol_cap": 12,
+    "text_truncated_to_chars": 220
+  },
+  "prices": {
+    "source": "Yahoo Finance chart JSON (range=3mo, interval=1d), .NS symbols",
+    "fetched_utc": "2026-10-31T18:19:27Z",
+    "fetched_via": "browser pane on the user's Mac (not from Render)",
+    "bars_kept": 22,
+    "last_bar": "2026-10-30"
+  },
+  "empty_window_checks": {
+    "TCS": {"window_count": 0, "count_since_01_08_2026": 45, "newest_filing": "19-Oct-2026 11:30:07"},
+    "ITC": {"window_count": 0, "count_since_01_08_2026": 14, "newest_filing": "15-Oct-2026 19:20:08"}
+  },
+  "note": "Demo portfolio of 16 NSE large caps chosen by the builder. Not investment advice."
+}

@@ -1,0 +1,702 @@
+// FINN front end. Plain JavaScript, no libraries, no external requests.
+// All text from the server is inserted with textContent (never innerHTML).
+
+var state = {
+  digest: null,
+  liveRows: null,
+  liveFetchedUtc: null,
+  windowHours: 24,
+  volThreshold: 2.0,
+  moveThreshold: 3,
+  questions: [],
+  selectedQuestion: null,
+  mode: "cached"
+};
+
+function el(tag, className, text) {
+  var node = document.createElement(tag);
+  if (className) {
+    node.className = className;
+  }
+  if (text !== undefined && text !== null) {
+    node.textContent = text;
+  }
+  return node;
+}
+
+function clear(node) {
+  while (node.firstChild) {
+    node.removeChild(node.firstChild);
+  }
+}
+
+function formatNumber(value, digits) {
+  if (value === null || value === undefined) {
+    return "–";
+  }
+  return Number(value).toLocaleString("en-IN", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+function compact(value) {
+  if (value === null || value === undefined) {
+    return "–";
+  }
+  if (value >= 10000000) {
+    return (value / 10000000).toFixed(2) + " Cr";
+  }
+  if (value >= 100000) {
+    return (value / 100000).toFixed(2) + " L";
+  }
+  return formatNumber(value, 0);
+}
+
+function formatTime(iso) {
+  var date = new Date(iso);
+  return date.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }) + " IST";
+}
+
+// ------------------------------------------------------------------ data
+
+function currentStats(entry) {
+  if (state.liveRows) {
+    for (var i = 0; i < state.liveRows.length; i++) {
+      var row = state.liveRows[i];
+      if (row.symbol === entry.symbol && row.ok) {
+        return row;
+      }
+    }
+  }
+  return entry;
+}
+
+function filingsInWindow() {
+  var asOf = new Date(state.digest.as_of_utc).getTime();
+  var cutoff = asOf - state.windowHours * 3600 * 1000;
+  var result = [];
+  for (var i = 0; i < state.digest.filings.length; i++) {
+    var filing = state.digest.filings[i];
+    if (new Date(filing.at).getTime() >= cutoff) {
+      result.push(filing);
+    }
+  }
+  return result;
+}
+
+function loadDigest() {
+  fetch("/api/digest")
+    .then(function (response) {
+      if (!response.ok) {
+        throw new Error("HTTP " + response.status);
+      }
+      return response.json();
+    })
+    .then(function (data) {
+      state.digest = data;
+      renderAll();
+    })
+    .catch(function (error) {
+      var status = document.getElementById("status");
+      status.textContent = "Could not load the digest (" + error.message + "). Pull to retry.";
+    });
+}
+
+// ------------------------------------------------------------------ digest rendering
+
+function renderStatus() {
+  var status = document.getElementById("status");
+  status.className = "status";
+  if (state.liveRows) {
+    status.classList.add("live");
+    var partial = false;
+    for (var i = 0; i < state.liveRows.length; i++) {
+      if (state.liveRows[i].partial) {
+        partial = true;
+      }
+    }
+    var text = "LIVE prices, fetched " + formatTime(state.liveFetchedUtc) + ". Filings are still the snapshot from " +
+      formatTime(state.digest.as_of_utc) + ".";
+    if (partial) {
+      text = text + " Today's session may be in progress, so volume ratios can read low.";
+    }
+    status.textContent = text;
+  } else {
+    var meta = state.digest.meta;
+    status.textContent = "Snapshot, not live. Filings as of " + formatTime(state.digest.as_of_utc) +
+      " (NSE). Prices to the " + meta.prices.last_bar + " close (Yahoo). Tap Refresh for live prices.";
+    status.title = state.digest.label;
+  }
+}
+
+function renderAlerts() {
+  var box = document.getElementById("alerts");
+  clear(box);
+  var count = 0;
+
+  for (var i = 0; i < state.digest.portfolio.length; i++) {
+    var entry = state.digest.portfolio[i];
+    var stats = currentStats(entry);
+
+    if (stats.volume_ratio !== null && stats.volume_ratio !== undefined && stats.volume_ratio >= state.volThreshold) {
+      var volCard = el("div", "item alert-vol");
+      var volMeta = el("div", "meta");
+      volMeta.appendChild(el("span", "chip", entry.symbol));
+      volMeta.appendChild(el("span", null, "Volume alert · bar of " + stats.last_date));
+      volCard.appendChild(volMeta);
+      volCard.appendChild(el("p", "title", "Volume " + stats.volume_ratio.toFixed(1) + "× its 20-day average"));
+      volCard.appendChild(el("p", "body", compact(stats.volume) + " shares traded vs " + compact(stats.avg_volume_20d) + " average"));
+      box.appendChild(volCard);
+      count = count + 1;
+    }
+
+    if (stats.change_pct !== null && stats.change_pct !== undefined && Math.abs(stats.change_pct) >= state.moveThreshold) {
+      var moveCard = el("div", "item alert-move");
+      var moveMeta = el("div", "meta");
+      moveMeta.appendChild(el("span", "chip", entry.symbol));
+      moveMeta.appendChild(el("span", null, "Price move · bar of " + stats.last_date));
+      moveCard.appendChild(moveMeta);
+      var sign = stats.change_pct > 0 ? "+" : "";
+      moveCard.appendChild(el("p", "title", sign + stats.change_pct.toFixed(2) + "% on the day"));
+      moveCard.appendChild(el("p", "body", "Close ₹" + formatNumber(stats.close, 2) + " vs ₹" + formatNumber(stats.prev_close, 2) + " the session before"));
+      box.appendChild(moveCard);
+      count = count + 1;
+    }
+  }
+
+  var inWindow = filingsInWindow();
+  for (var j = 0; j < inWindow.length; j++) {
+    var filing = inWindow[j];
+    if (filing.tier === "high") {
+      box.appendChild(filingCard(filing, true));
+      count = count + 1;
+    }
+  }
+
+  if (count === 0) {
+    box.appendChild(el("div", "empty", "No alerts in this window at these thresholds."));
+  }
+  document.getElementById("alert-count").textContent = count + " triggered";
+}
+
+function filingCard(filing, asAlert) {
+  var card = el("div", asAlert ? "item alert-high" : "item");
+  var meta = el("div", "meta");
+  meta.appendChild(el("span", "chip", filing.symbol));
+  meta.appendChild(el("span", "chip " + filing.tier, filing.tier));
+  meta.appendChild(el("span", null, formatTime(filing.at)));
+  if (filing.dup_count > 1) {
+    meta.appendChild(el("span", null, "×" + filing.dup_count + " filed"));
+  }
+  card.appendChild(meta);
+  card.appendChild(el("p", "title", filing.desc));
+  card.appendChild(el("p", "body", filing.text));
+  var reason = el("p", "hint", "Tier: " + filing.tier_reason);
+  card.appendChild(reason);
+  if (filing.url) {
+    var link = el("a", "link", "Open filing PDF ↗");
+    link.href = filing.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    card.appendChild(link);
+  }
+  return card;
+}
+
+function renderFilings() {
+  var box = document.getElementById("filings");
+  clear(box);
+  var inWindow = filingsInWindow();
+  var groups = { high: [], medium: [], low: [] };
+  for (var i = 0; i < inWindow.length; i++) {
+    groups[inWindow[i].tier].push(inWindow[i]);
+  }
+  document.getElementById("filing-count").textContent = inWindow.length + " in window";
+
+  if (inWindow.length === 0) {
+    box.appendChild(el("div", "empty", "No filings in this window."));
+    return;
+  }
+
+  var order = ["high", "medium", "low"];
+  var titles = { high: "Material", medium: "Other updates", low: "Routine" };
+  for (var g = 0; g < order.length; g++) {
+    var tier = order[g];
+    var list = groups[tier];
+    if (list.length === 0) {
+      continue;
+    }
+    var details = el("details", "group");
+    if (tier === "high") {
+      details.open = true;
+    }
+    var summary = el("summary");
+    summary.appendChild(el("span", null, titles[tier]));
+    summary.appendChild(el("span", "hint", list.length + (tier === "high" ? "" : " (tap to expand)")));
+    details.appendChild(summary);
+    var inner = el("div", "stack");
+    for (var k = 0; k < list.length; k++) {
+      inner.appendChild(filingCard(list[k], false));
+    }
+    details.appendChild(inner);
+    box.appendChild(details);
+  }
+}
+
+function renderPortfolio() {
+  var box = document.getElementById("portfolio");
+  clear(box);
+  for (var i = 0; i < state.digest.portfolio.length; i++) {
+    var entry = state.digest.portfolio[i];
+    var stats = currentStats(entry);
+    var row = el("button", "stock");
+    row.type = "button";
+    row.setAttribute("data-symbol", entry.symbol);
+
+    var left = el("span", "sym", entry.symbol);
+    if (entry.has_research) {
+      left.appendChild(el("span", "badge", "docs"));
+    }
+    left.appendChild(el("span", "nm", entry.name || ""));
+    row.appendChild(left);
+
+    row.appendChild(el("span", "num", "₹" + formatNumber(stats.close, 2)));
+
+    var change = stats.change_pct;
+    var cls = "num";
+    var label = "–";
+    if (change !== null && change !== undefined) {
+      cls = "num " + (change >= 0 ? "up" : "down");
+      label = (change > 0 ? "+" : "") + change.toFixed(2) + "%";
+    }
+    row.appendChild(el("span", cls, label));
+    box.appendChild(row);
+  }
+}
+
+function renderAll() {
+  renderStatus();
+  renderAlerts();
+  renderFilings();
+  renderPortfolio();
+}
+
+// ------------------------------------------------------------------ stock sheet
+
+function openSheet(symbol) {
+  var entry = null;
+  for (var i = 0; i < state.digest.portfolio.length; i++) {
+    if (state.digest.portfolio[i].symbol === symbol) {
+      entry = state.digest.portfolio[i];
+    }
+  }
+  if (!entry) {
+    return;
+  }
+  var stats = currentStats(entry);
+  document.getElementById("sheet-title").textContent = entry.symbol + " · " + (entry.name || "");
+  var content = document.getElementById("sheet-content");
+  clear(content);
+
+  var summary = el("div", "card");
+  summary.appendChild(el("p", "title", "₹" + formatNumber(stats.close, 2)));
+  var line = "Bar of " + stats.last_date + ": ";
+  if (stats.change_pct !== null && stats.change_pct !== undefined) {
+    line = line + (stats.change_pct > 0 ? "+" : "") + stats.change_pct.toFixed(2) + "% · ";
+  }
+  line = line + "volume " + compact(stats.volume) + " (" + (stats.volume_ratio ? stats.volume_ratio.toFixed(2) + "× 20-day avg" : "no average") + ")";
+  summary.appendChild(el("p", "body", line));
+  content.appendChild(summary);
+
+  if (entry.has_research) {
+    var ask = el("button", "btn", "Open research for " + entry.symbol);
+    ask.type = "button";
+    ask.id = "sheet-research";
+    ask.addEventListener("click", function () {
+      closeSheet();
+      showTab("research");
+    });
+    content.appendChild(ask);
+  } else {
+    content.appendChild(el("p", "note", "No primary-source documents are loaded for " + entry.symbol + ". The research demo covers KPITTECH only."));
+  }
+
+  content.appendChild(el("h2", "section", "Filings in snapshot (7 days)"));
+  var stack = el("div", "stack");
+  var found = 0;
+  for (var j = 0; j < state.digest.filings.length; j++) {
+    if (state.digest.filings[j].symbol === symbol) {
+      stack.appendChild(filingCard(state.digest.filings[j], false));
+      found = found + 1;
+    }
+  }
+  if (found === 0) {
+    var note = entry.no_filings_note || "No filings in the snapshot window.";
+    stack.appendChild(el("div", "empty", note));
+  }
+  content.appendChild(stack);
+
+  document.getElementById("sheet").hidden = false;
+  document.getElementById("sheet-close").focus();
+}
+
+function closeSheet() {
+  document.getElementById("sheet").hidden = true;
+}
+
+// ------------------------------------------------------------------ live refresh
+
+function refreshPrices() {
+  var button = document.getElementById("refresh-btn");
+  var note = document.getElementById("refresh-note");
+  button.disabled = true;
+  note.textContent = "Fetching…";
+  fetch("/api/prices/refresh", { method: "POST" })
+    .then(function (response) {
+      return response.json().then(function (body) {
+        return { ok: response.ok, body: body };
+      });
+    })
+    .then(function (result) {
+      if (!result.ok) {
+        var code = result.body.detail && result.body.detail.code ? result.body.detail.code : "error";
+        note.textContent = "Live refresh failed (" + code + "). Showing snapshot.";
+        return;
+      }
+      state.liveRows = result.body.rows;
+      state.liveFetchedUtc = result.body.fetched_utc;
+      note.textContent = result.body.ok_count + " of " + result.body.rows.length + " symbols updated";
+      renderAll();
+    })
+    .catch(function () {
+      note.textContent = "Live refresh failed (network). Showing snapshot.";
+    })
+    .then(function () {
+      button.disabled = false;
+    });
+}
+
+// ------------------------------------------------------------------ tabs
+
+function showTab(name) {
+  var tabs = ["digest", "research"];
+  for (var i = 0; i < tabs.length; i++) {
+    var panel = document.getElementById("tab-" + tabs[i]);
+    var button = document.getElementById("btn-" + tabs[i]);
+    var active = tabs[i] === name;
+    panel.hidden = !active;
+    button.classList.toggle("on", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  window.scrollTo(0, 0);
+  if (name === "research" && state.questions.length === 0) {
+    loadQuestions();
+  }
+}
+
+// ------------------------------------------------------------------ research
+
+function loadQuestions() {
+  fetch("/api/questions")
+    .then(function (response) {
+      return response.json();
+    })
+    .then(function (data) {
+      state.questions = data.questions;
+      renderQuestions();
+    })
+    .catch(function () {
+      var box = document.getElementById("questions");
+      clear(box);
+      box.appendChild(el("div", "error", "Could not load the question list."));
+    });
+}
+
+function renderQuestions() {
+  var box = document.getElementById("questions");
+  clear(box);
+  for (var i = 0; i < state.questions.length; i++) {
+    var question = state.questions[i];
+    var button = el("button", "qbtn");
+    button.type = "button";
+    button.setAttribute("data-id", question.id);
+    button.appendChild(el("span", null, (question.symbol || "") + " · " + (question.short || question.id)));
+    button.appendChild(el("small", null, question.question));
+    if (state.selectedQuestion === question.id) {
+      button.classList.add("on");
+    }
+    box.appendChild(button);
+  }
+  updateRunButton();
+}
+
+function updateRunButton() {
+  var run = document.getElementById("run-btn");
+  if (!state.selectedQuestion) {
+    run.disabled = true;
+    run.textContent = "Choose a question";
+    return;
+  }
+  run.disabled = false;
+  run.textContent = state.mode === "live" ? "Run live analysis" : "Show cached answer";
+}
+
+function findPassage(record, sourceId) {
+  var passages = record.passages || [];
+  for (var i = 0; i < passages.length; i++) {
+    if (passages[i].source_id === sourceId) {
+      return passages[i];
+    }
+  }
+  return null;
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function renderPassageWithQuote(container, passageText, quote) {
+  var words = quote.trim().split(/\s+/);
+  var escaped = [];
+  for (var i = 0; i < words.length; i++) {
+    escaped.push(escapeRegExp(words[i]));
+  }
+  var found = null;
+  if (words.length > 0 && words[0] !== "") {
+    var pattern = new RegExp(escaped.join("\\s+"), "i");
+    found = pattern.exec(passageText);
+  }
+  if (!found) {
+    container.textContent = passageText;
+    return false;
+  }
+  container.appendChild(document.createTextNode(passageText.slice(0, found.index)));
+  container.appendChild(el("mark", null, found[0]));
+  container.appendChild(document.createTextNode(passageText.slice(found.index + found[0].length)));
+  return true;
+}
+
+function renderResult(record) {
+  var box = document.getElementById("result");
+  clear(box);
+
+  var bannerClass = "banner cached";
+  var heading = "CACHED demo answer";
+  if (record.mode === "live") {
+    bannerClass = "banner live";
+    heading = "LIVE analysis";
+  } else if (record.source_type && record.source_type !== "model") {
+    bannerClass = "banner op";
+    heading = "CACHED · operator-written extract, not model output";
+  }
+  var banner = el("div", bannerClass);
+  banner.appendChild(el("b", null, heading));
+  banner.appendChild(el("span", null, record.label));
+  box.appendChild(banner);
+
+  if (record.fallback_reason) {
+    box.appendChild(el("p", "note", "Showing cached because live was not used: " + record.fallback_reason.code + "."));
+  }
+
+  var result = record.result || {};
+  box.appendChild(el("p", "answer", result.answer || "No answer text."));
+  if (result.not_stated) {
+    box.appendChild(el("p", "note", "The passages do not state an answer."));
+  }
+
+  var claims = result.claims || [];
+  var checks = (record.auto_check && record.auto_check.claims) ? record.auto_check.claims : [];
+  for (var i = 0; i < claims.length; i++) {
+    box.appendChild(claimNode(record, claims[i], checks[i]));
+  }
+
+  if (record.auto_check) {
+    var summary = record.auto_check.auto_pass_count + " of " + record.auto_check.claim_count +
+      " claims passed the mechanical check (source exists, quote is verbatim, numbers appear in the source).";
+    box.appendChild(el("p", "note", summary));
+  }
+  box.appendChild(el("p", "note", record.disclaimer || ""));
+}
+
+function claimNode(record, claim, check) {
+  var wrapper = el("div", "claim");
+  var button = el("button");
+  button.type = "button";
+  button.setAttribute("aria-expanded", "false");
+  button.appendChild(el("span", null, claim.text));
+
+  var tags = el("div", "tags");
+  var passage = findPassage(record, claim.source);
+  var where = claim.source;
+  if (passage) {
+    where = claim.source + " · PDF page " + passage.page;
+    if (passage.speaker) {
+      where = where + " · " + passage.speaker;
+    }
+  }
+  tags.appendChild(el("span", "chip", where));
+  if (check) {
+    if (check.auto_pass) {
+      tags.appendChild(el("span", "ok", "✓ quote verbatim in source"));
+    } else {
+      tags.appendChild(el("span", "bad", "✗ check failed"));
+    }
+  }
+  tags.appendChild(el("span", "hint", "tap to see source"));
+  button.appendChild(tags);
+  wrapper.appendChild(button);
+
+  var passageBox = el("div", "passage");
+  passageBox.hidden = true;
+  if (passage) {
+    var located = renderPassageWithQuote(passageBox, passage.text, claim.quote || "");
+    if (!located) {
+      passageBox.appendChild(el("p", "note", "Quote not located in this passage."));
+    }
+  } else {
+    passageBox.textContent = "Cited source is not in the returned passages.";
+  }
+  wrapper.appendChild(passageBox);
+
+  button.addEventListener("click", function () {
+    var open = passageBox.hidden;
+    passageBox.hidden = !open;
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  return wrapper;
+}
+
+function runResearch() {
+  var box = document.getElementById("result");
+  var run = document.getElementById("run-btn");
+  clear(box);
+  run.disabled = true;
+  run.textContent = state.mode === "live" ? "Asking the model…" : "Loading…";
+  fetch("/api/research", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question_id: state.selectedQuestion, mode: state.mode })
+  })
+    .then(function (response) {
+      return response.json().then(function (body) {
+        return { ok: response.ok, status: response.status, body: body };
+      });
+    })
+    .then(function (result) {
+      if (!result.ok) {
+        var detail = result.body.detail || {};
+        var code = detail.code || ("HTTP " + result.status);
+        var message = "Could not get an answer (" + code + ").";
+        if (state.mode === "live") {
+          message = message + " Live analysis is unavailable right now; switch to Cached.";
+        }
+        box.appendChild(el("div", "error", message));
+        return;
+      }
+      renderResult(result.body);
+    })
+    .catch(function () {
+      box.appendChild(el("div", "error", "Network error. Try again."));
+    })
+    .then(function () {
+      updateRunButton();
+    });
+}
+
+// ------------------------------------------------------------------ wiring
+
+function setSegmentOn(groupId, attribute, value) {
+  var buttons = document.getElementById(groupId).querySelectorAll("button");
+  for (var i = 0; i < buttons.length; i++) {
+    var isOn = buttons[i].getAttribute(attribute) === String(value);
+    buttons[i].classList.toggle("on", isOn);
+  }
+}
+
+function wire() {
+  document.getElementById("btn-digest").addEventListener("click", function () {
+    showTab("digest");
+  });
+  document.getElementById("btn-research").addEventListener("click", function () {
+    showTab("research");
+  });
+
+  document.getElementById("window-seg").addEventListener("click", function (event) {
+    var target = event.target.closest("button");
+    if (!target) {
+      return;
+    }
+    state.windowHours = Number(target.getAttribute("data-hours"));
+    setSegmentOn("window-seg", "data-hours", state.windowHours);
+    renderAlerts();
+    renderFilings();
+  });
+
+  document.getElementById("vol-minus").addEventListener("click", function () {
+    state.volThreshold = Math.max(1.0, Math.round((state.volThreshold - 0.5) * 10) / 10);
+    document.getElementById("vol-out").textContent = state.volThreshold.toFixed(1) + "×";
+    renderAlerts();
+  });
+  document.getElementById("vol-plus").addEventListener("click", function () {
+    state.volThreshold = Math.min(10, Math.round((state.volThreshold + 0.5) * 10) / 10);
+    document.getElementById("vol-out").textContent = state.volThreshold.toFixed(1) + "×";
+    renderAlerts();
+  });
+  document.getElementById("move-minus").addEventListener("click", function () {
+    state.moveThreshold = Math.max(1, state.moveThreshold - 1);
+    document.getElementById("move-out").textContent = "±" + state.moveThreshold + "%";
+    renderAlerts();
+  });
+  document.getElementById("move-plus").addEventListener("click", function () {
+    state.moveThreshold = Math.min(20, state.moveThreshold + 1);
+    document.getElementById("move-out").textContent = "±" + state.moveThreshold + "%";
+    renderAlerts();
+  });
+
+  document.getElementById("refresh-btn").addEventListener("click", refreshPrices);
+
+  document.getElementById("portfolio").addEventListener("click", function (event) {
+    var target = event.target.closest("button.stock");
+    if (target) {
+      openSheet(target.getAttribute("data-symbol"));
+    }
+  });
+  document.getElementById("sheet-close").addEventListener("click", closeSheet);
+  document.getElementById("sheet").addEventListener("click", function (event) {
+    if (event.target.id === "sheet") {
+      closeSheet();
+    }
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") {
+      closeSheet();
+    }
+  });
+
+  document.getElementById("questions").addEventListener("click", function (event) {
+    var target = event.target.closest("button.qbtn");
+    if (!target) {
+      return;
+    }
+    state.selectedQuestion = target.getAttribute("data-id");
+    renderQuestions();
+  });
+  document.getElementById("mode-seg").addEventListener("click", function (event) {
+    var target = event.target.closest("button");
+    if (!target) {
+      return;
+    }
+    state.mode = target.getAttribute("data-mode");
+    setSegmentOn("mode-seg", "data-mode", state.mode);
+    updateRunButton();
+  });
+  document.getElementById("run-btn").addEventListener("click", runResearch);
+}
+
+wire();
+loadDigest();

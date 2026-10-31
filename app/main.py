@@ -17,9 +17,11 @@ import uuid
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from finn import budget, grounded_qa, hostcheck, llm_adapter, snapshot
+from finn import budget, digest, grounded_qa, hostcheck, llm_adapter, prices, snapshot
 
 app = FastAPI(title="FINN backend", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -66,9 +68,37 @@ class ResearchRequest(BaseModel):
     mode: str = "auto"  # auto = live if possible else cached; live; cached
 
 
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
 @app.get("/")
 def root():
-    return {"service": "finn-backend"}
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"), headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/digest")
+def get_digest():
+    result = digest.build_digest(questions=grounded_qa.QUESTIONS)
+    if result is None:
+        raise HTTPException(status_code=503, detail={"code": "digest_snapshot_missing"})
+    return result
+
+
+LAST_PRICE_REFRESH = {"at": 0.0}
+
+
+@app.post("/api/prices/refresh")
+def refresh_prices():
+    """Live Yahoo prices for the fixed demo portfolio. Cached 120 s; at most one real refresh per 20 s."""
+    now = time.time()
+    if now - LAST_PRICE_REFRESH["at"] < 20 and prices._cache["data"] is None:
+        raise HTTPException(status_code=429, detail={"code": "refresh_too_soon"})
+    LAST_PRICE_REFRESH["at"] = now
+    payload, _ = prices.refresh_all()
+    if payload["ok_count"] == 0:
+        raise HTTPException(status_code=503, detail={"code": "live_prices_unavailable"})
+    return payload
 
 
 @app.get("/healthz")
@@ -97,7 +127,8 @@ def list_questions():
                       "verification": entry.get("verification"),
                       "label": llm_adapter.make_label("cached", entry.get("model"), entry.get("generated_at"),
                                                       entry.get("verification", ""), entry.get("source_type", "model"))}
-        items.append({"id": question["id"], "doc": question["doc"], "question": question["question"], "cached": cached})
+        items.append({"id": question["id"], "doc": question["doc"], "symbol": question.get("symbol"),
+                      "short": question.get("short"), "question": question["question"], "cached": cached})
     return {"questions": items}
 
 

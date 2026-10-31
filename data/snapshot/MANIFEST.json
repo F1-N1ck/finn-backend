@@ -13,6 +13,18 @@
       "pages": 210,
       "source_url": "https://www.bseindia.com/xml-data/corpfiling/AttachHis/4d2467e3-e28a-472b-8492-7fd9e46e63c4.pdf",
       "kind": "annual_report"
+    },
+    "raw_announcements.json": {
+      "sha256": "56ca401dc7b7c1aecc6bb558f5a9ea379b6a7f6589b8e5833e5d624b752b2ae3",
+      "note": "NSE corporate-announcements API, 16 symbols, fetched 2026-10-31T18:17:41Z via browser"
+    },
+    "raw_prices.json": {
+      "sha256": "41b61e2b113bde0eec5700d345b564a9615bf5bca476bcc1216736dbf4defcc0",
+      "note": "Yahoo chart JSON, 22 bars x 16 symbols, fetched 2026-10-31T18:19:27Z via browser"
+    },
+    "digest_meta.json": {
+      "sha256": "87e143d3be668cf12565ea68fb696affb6931249f27a56e22ecd41acd0b9b252",
+      "note": "fetch metadata and empty-window checks"
     }
   }
 }
