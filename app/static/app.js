@@ -481,8 +481,8 @@ function renderPassageWithQuote(container, passageText, quote) {
   return true;
 }
 
-function renderResult(record) {
-  var box = document.getElementById("result");
+function renderResult(record, targetBox) {
+  var box = targetBox || document.getElementById("result");
   clear(box);
 
   var bannerClass = "banner cached";
@@ -608,6 +608,331 @@ function runResearch() {
     });
 }
 
+
+// ------------------------------------------------------------------ generic research (any ticker)
+
+var analyze = { timer: null, jobId: null, startedAt: 0 };
+
+function safeLink(url, text) {
+  if (typeof url === "string" && url.indexOf("https://") === 0) {
+    var link = el("a", null, text);
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    return link;
+  }
+  return el("span", null, text);
+}
+
+function stageList(stages) {
+  var list = el("ul", "progress");
+  for (var i = 0; i < stages.length; i++) {
+    var stage = stages[i];
+    var item = el("li", stage.status);
+    var mark = "•";
+    if (stage.status === "running") { mark = "…"; }
+    if (stage.status === "ok") { mark = "✓"; }
+    if (stage.status === "failed" || stage.status === "unverified") { mark = "✗"; }
+    if (stage.status === "not_found") { mark = "–"; }
+    item.appendChild(el("span", "dot", mark));
+    var text = stage.name + (stage.seconds !== null && stage.seconds !== undefined ? " (" + stage.seconds + " s)" : "");
+    if (stage.note) { text = text + ": " + stage.note; }
+    item.appendChild(el("span", null, text));
+    list.appendChild(item);
+  }
+  return list;
+}
+
+function setAnalyzeBusy(busy) {
+  document.getElementById("analyze-btn").disabled = busy;
+  document.getElementById("ticker-input").disabled = busy;
+}
+
+function showProgress(job) {
+  var box = document.getElementById("analyze-progress");
+  clear(box);
+  var elapsed = Math.round((Date.now() - analyze.startedAt) / 1000);
+  box.appendChild(el("p", "note", "Analysing " + job.symbol + " · " + elapsed + " s elapsed. You can leave this tab open; nothing is sent twice."));
+  box.appendChild(stageList(job.stages || []));
+}
+
+function showAnalyzeError(message) {
+  var box = document.getElementById("analyze-progress");
+  clear(box);
+  box.appendChild(el("div", "error", message));
+}
+
+var ERROR_TEXT = {
+  invalid_ticker: "That is not a valid NSE ticker. Use letters, digits, & or - (up to 20 characters).",
+  busy: "Another analysis is running on the free server. Try again in a minute.",
+  rate_limited_hourly: "The hourly limit for live analyses has been reached. Try again later.",
+  rate_limited_daily: "The daily limit for live analyses has been reached. Try again tomorrow.",
+  model_not_configured: "The live model is not configured on this server.",
+  ticker_not_found: "No company page was found for that ticker. Check the NSE symbol.",
+  source_unreachable: "The document index (Screener) could not be reached. Try again later.",
+  company_not_resolved: "The page did not identify a company for that ticker.",
+  ticker_mismatch: "The page found belongs to a different NSE symbol.",
+  documents_not_listed: "The company page lists no annual report or earnings-call documents."
+};
+
+function describeError(code, fallback) {
+  return ERROR_TEXT[code] || fallback || ("Request failed (" + code + ").");
+}
+
+function startAnalysis(event) {
+  event.preventDefault();
+  var input = document.getElementById("ticker-input");
+  var ticker = input.value.trim();
+  if (ticker === "") {
+    showAnalyzeError(describeError("invalid_ticker"));
+    return;
+  }
+  clear(document.getElementById("brief"));
+  setAnalyzeBusy(true);
+  analyze.startedAt = Date.now();
+  fetch("/api/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ticker: ticker })
+  })
+    .then(function (response) {
+      return response.json().then(function (body) {
+        return { ok: response.ok, status: response.status, body: body };
+      });
+    })
+    .then(function (result) {
+      if (!result.ok) {
+        var detail = result.body.detail || {};
+        var code = detail.code || ("HTTP " + result.status);
+        if (result.status === 422 && !detail.code) { code = "invalid_ticker"; }
+        showAnalyzeError(describeError(code, detail.message));
+        setAnalyzeBusy(false);
+        return;
+      }
+      handleJob(result.body);
+    })
+    .catch(function () {
+      showAnalyzeError("Network error. Try again.");
+      setAnalyzeBusy(false);
+    });
+}
+
+function handleJob(job) {
+  analyze.jobId = job.job_id;
+  if (job.status === "running") {
+    showProgress(job);
+    window.clearTimeout(analyze.timer);
+    analyze.timer = window.setTimeout(pollJob, 3000);
+    return;
+  }
+  setAnalyzeBusy(false);
+  var box = document.getElementById("analyze-progress");
+  clear(box);
+  if (job.status === "failed") {
+    var error = job.error || {};
+    showAnalyzeError(describeError(error.code, error.message));
+    if (job.stages && job.stages.length) { document.getElementById("analyze-progress").appendChild(stageList(job.stages)); }
+    return;
+  }
+  renderBrief(job.brief, job);
+}
+
+function pollJob() {
+  if (Date.now() - analyze.startedAt > 12 * 60 * 1000) {
+    showAnalyzeError("Still running after 12 minutes; stopped waiting. Reload and try again.");
+    setAnalyzeBusy(false);
+    return;
+  }
+  fetch("/api/analyze/" + analyze.jobId)
+    .then(function (response) {
+      return response.json().then(function (body) {
+        return { ok: response.ok, body: body };
+      });
+    })
+    .then(function (result) {
+      if (!result.ok) {
+        showAnalyzeError("The job was lost (the free server may have restarted). Try again.");
+        setAnalyzeBusy(false);
+        return;
+      }
+      handleJob(result.body);
+    })
+    .catch(function () {
+      analyze.timer = window.setTimeout(pollJob, 5000);
+    });
+}
+
+function docNode(label, doc) {
+  var box = el("div", "doc");
+  if (doc.status !== "ok") {
+    box.appendChild(el("b", null, label + ": not available"));
+    box.appendChild(el("span", null, doc.reason || ""));
+    return box;
+  }
+  box.appendChild(el("b", null, doc.title));
+  box.appendChild(el("span", null, "Date label: " + (doc.date_label || "not listed") +
+    (doc.date_in_text ? " · call dated " + doc.date_in_text + " in the transcript" : "") +
+    " · " + doc.host));
+  box.appendChild(document.createElement("br"));
+  box.appendChild(safeLink(doc.url, "Open source PDF"));
+  var chips = el("div", "chips");
+  var source = doc.fetch.source;
+  if (source === "fetched_now") {
+    chips.appendChild(el("span", "chip fresh", "fetched now"));
+  } else if (source === "disk_cache") {
+    chips.appendChild(el("span", "chip stale", "from server cache · fetched " + doc.fetch.fetched_at));
+  } else {
+    chips.appendChild(el("span", "chip stale", "cached with brief · fetched " + doc.fetch.fetched_at));
+  }
+  var ex = doc.extraction;
+  chips.appendChild(el("span", ex.state === "ok" ? "chip" : "chip warn", "text: " + ex.state + " · " + ex.pages_extracted + "/" + ex.page_count + " pages"));
+  box.appendChild(chips);
+  if (doc.skipped && doc.skipped.length) {
+    var states = [];
+    for (var i = 0; i < doc.skipped.length; i++) { states.push((doc.skipped[i].label || "") + " " + doc.skipped[i].state); }
+    box.appendChild(el("p", "note", "Skipped newer candidate: " + states.join("; ")));
+  }
+  return box;
+}
+
+function citeNode(citation, passages) {
+  var box = el("div", "passage cite");
+  box.hidden = true;
+  box.appendChild(el("div", null, citation.doc_title));
+  box.appendChild(el("div", null, "Date: " + citation.doc_date));
+  box.appendChild(el("div", null, "PDF page " + citation.pdf_page + (citation.speaker ? " · speaker " + citation.speaker : "")));
+  var linkRow = el("div");
+  linkRow.appendChild(safeLink(citation.url, "Open source document"));
+  box.appendChild(linkRow);
+  var quote = el("blockquote");
+  var found = null;
+  for (var i = 0; i < (passages || []).length; i++) {
+    if (passages[i].source_id === citation.source_id) { found = passages[i]; }
+  }
+  var located = false;
+  if (found) {
+    located = renderPassageWithQuote(quote, found.text, citation.excerpt || "");
+  }
+  if (!located) {
+    quote.textContent = citation.excerpt || "";
+  }
+  box.appendChild(quote);
+  return box;
+}
+
+function briefClaimNode(headline, tags, citation, passages, extraClass) {
+  var wrapper = el("div", "claim");
+  var button = el("button");
+  button.type = "button";
+  button.setAttribute("aria-expanded", "false");
+  button.appendChild(el("span", extraClass, headline));
+  var tagBox = el("div", "tags");
+  for (var i = 0; i < tags.length; i++) { tagBox.appendChild(el("span", "chip", tags[i])); }
+  if (citation) {
+    tagBox.appendChild(el("span", "chip", "PDF page " + citation.pdf_page));
+  }
+  tagBox.appendChild(el("span", "ok", "✓ quote verbatim"));
+  tagBox.appendChild(el("span", "hint", "tap for citation"));
+  button.appendChild(tagBox);
+  wrapper.appendChild(button);
+  var cite = null;
+  if (citation) {
+    cite = citeNode(citation, passages);
+    wrapper.appendChild(cite);
+  }
+  button.addEventListener("click", function () {
+    if (!cite) { return; }
+    var open = cite.hidden;
+    cite.hidden = !open;
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  return wrapper;
+}
+
+function sectionNode(title, section) {
+  var box = el("div", "brief-section");
+  var heading = el("h3", null, title + " ");
+  var statusText = { ok: "found", not_found: "not found", unverified: "unverified", unavailable: "unavailable" }[section.status] || section.status;
+  heading.appendChild(el("span", section.status === "ok" ? "chip fresh" : "chip warn", statusText));
+  box.appendChild(heading);
+  if (section.status !== "ok") {
+    var why = section.status === "not_found" ? "Not found: " : (section.status === "unavailable" ? "Unavailable: " : "Unverified: ");
+    box.appendChild(el("div", "notfound", why + (section.reason || "")));
+  }
+  var claims = section.claims || [];
+  for (var i = 0; i < claims.length; i++) {
+    box.appendChild(briefClaimNode(claims[i].text, [], claims[i].citation, section.passages));
+  }
+  var items = section.items || [];
+  for (var j = 0; j < items.length; j++) {
+    var item = items[j];
+    var headline = item.metric + ": " + item.value + " " + item.unit;
+    var tags = [item.scope === "not stated" ? "scope: not stated in passage" : item.scope, item.period];
+    box.appendChild(briefClaimNode(headline, tags, item.citation, section.passages, "metric"));
+  }
+  var failed = section.failed_checks || [];
+  if (failed.length) {
+    var details = el("details", "failed");
+    details.appendChild(el("summary", null, failed.length + " statement(s) failed the automatic check and are not shown as findings"));
+    for (var k = 0; k < failed.length; k++) {
+      var f = failed[k];
+      var line = (f.text || (f.metric + " " + f.value)) + " [" + (f.problems ? f.problems.join(", ") : "quote or numbers not in source") + "]";
+      details.appendChild(el("p", "note", line));
+    }
+    box.appendChild(details);
+  }
+  if (section.note) { box.appendChild(el("p", "note", section.note)); }
+  return box;
+}
+
+function renderBrief(brief, job) {
+  var box = document.getElementById("brief");
+  clear(box);
+  if (brief.answer_source === "snapshot_fallback") {
+    var banner = el("div", "banner op");
+    banner.appendChild(el("b", null, "SAVED SNAPSHOT, not a fresh analysis"));
+    banner.appendChild(el("span", null, brief.label));
+    box.appendChild(banner);
+    var reason = brief.fallback_reason || {};
+    box.appendChild(el("p", "note", "Live analysis was not used: " + (reason.code || "unknown") + (reason.message ? " (" + reason.message + ")" : "") + "."));
+    for (var a = 0; a < (brief.snapshot_answers || []).length; a++) {
+      var holder = el("div");
+      box.appendChild(holder);
+      renderResult(brief.snapshot_answers[a], holder);
+    }
+    return;
+  }
+  var cached = brief.answer_source === "cached_brief";
+  var head = el("div", cached ? "banner cached" : "banner live");
+  head.appendChild(el("b", null, cached ? "CACHED brief" : "LIVE brief"));
+  head.appendChild(el("span", null, brief.label));
+  box.appendChild(head);
+
+  var company = brief.company || {};
+  box.appendChild(el("h2", "section", (company.name || brief.ticker) + " · NSE " + (company.nse_symbol || brief.ticker)));
+  var docs = el("div", "docs");
+  docs.appendChild(docNode("Annual report", brief.documents.annual_report));
+  docs.appendChild(docNode("Earnings call", brief.documents.concall));
+  box.appendChild(docs);
+
+  box.appendChild(sectionNode("Business overview", brief.sections.overview));
+  box.appendChild(sectionNode("Management outlook", brief.sections.outlook));
+  box.appendChild(sectionNode("Selected reported numbers", brief.sections.numbers));
+
+  if (brief.notes && brief.notes.length) {
+    box.appendChild(el("p", "note", brief.notes.join(" ")));
+  }
+  var limits = el("details", "failed");
+  limits.appendChild(el("summary", null, "Limitations and timings"));
+  for (var i = 0; i < (brief.limitations || []).length; i++) {
+    limits.appendChild(el("p", "note", brief.limitations[i]));
+  }
+  limits.appendChild(el("p", "note", "Total " + brief.total_seconds + " s (when generated)."));
+  limits.appendChild(stageList(brief.stages || []));
+  box.appendChild(limits);
+  box.appendChild(el("p", "note", brief.disclaimer || ""));
+}
+
 // ------------------------------------------------------------------ wiring
 
 function setSegmentOn(groupId, attribute, value) {
@@ -696,6 +1021,7 @@ function wire() {
     updateRunButton();
   });
   document.getElementById("run-btn").addEventListener("click", runResearch);
+  document.getElementById("analyze-form").addEventListener("submit", startAnalysis);
 }
 
 wire();

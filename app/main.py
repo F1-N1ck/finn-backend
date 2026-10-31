@@ -1,6 +1,7 @@
 """FINN minimal backend (FastAPI).
 
-Public routes:  GET /healthz, GET /api/questions, POST /api/research
+Public routes:  GET /healthz, GET /api/questions, POST /api/research,
+                POST /api/analyze (any NSE ticker, job based), GET /api/analyze/{job_id}
 Admin routes:   POST /admin/host-check, GET /admin/host-check/{job_id}
                 (bearer token required, fixed targets only, disabled unless enabled by env)
 
@@ -17,11 +18,13 @@ import uuid
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from finn import budget, digest, grounded_qa, hostcheck, llm_adapter, prices, snapshot
+from finn.research import jobs as research_jobs
+from finn.research import validate as research_validate
 
 app = FastAPI(title="FINN backend", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -177,6 +180,59 @@ def research(request: ResearchRequest):
     record["disclaimer"] = ("Passages are top-k retrieval, not the whole document; the answer may omit relevant "
                             "statements. Mechanical checks do not verify meaning.")
     return record
+
+
+# ---------------------------------------------------------------- generic research (any NSE ticker)
+
+def snapshot_fallback(symbol, reason):
+    """The saved KPIT demo answers, clearly labelled. None for any other ticker."""
+    matching = [q for q in grounded_qa.QUESTIONS if q.get("symbol") == symbol]
+    if len(matching) == 0:
+        return None
+    answers = []
+    for question in matching:
+        pages = snapshot.load_pages(question["doc"])
+        if pages is None:
+            continue
+        record = grounded_qa.run_question(get_config(), question, pages, snapshot.cache_path(), allow_live=False)
+        if record.get("outcome") == "cached":
+            record["mode"] = record.pop("outcome")
+            answers.append(record)
+    if len(answers) == 0:
+        return None
+    return {"ticker": symbol, "answer_source": "snapshot_fallback", "sections": {},
+            "label": "SAVED SNAPSHOT | documents were retrieved earlier and committed with the app; nothing below was fetched now",
+            "fallback_reason": reason, "snapshot_answers": answers,
+            "disclaimer": "Saved demo answers for a fixed pair of questions, not a fresh analysis."}
+
+
+RESEARCH = research_jobs.ResearchService(get_config, fallback_fn=snapshot_fallback)
+
+
+class AnalyzeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a url field (or anything else) is rejected, not ignored
+    ticker: str
+
+
+@app.post("/api/analyze", status_code=202)
+def analyze(request: AnalyzeRequest):
+    symbol, code, message = research_validate.validate_ticker(request.ticker)
+    if symbol is None:
+        raise HTTPException(status_code=422, detail={"code": code, "message": message})
+    try:
+        return RESEARCH.submit(symbol)
+    except research_jobs.ServiceError as error:
+        raise HTTPException(status_code=error.status, detail={"code": error.code, "message": error.message})
+
+
+@app.get("/api/analyze/{job_id}")
+def analyze_status(job_id: str):
+    if len(job_id) != 12 or any(c not in "0123456789abcdef" for c in job_id):
+        raise HTTPException(status_code=404, detail={"code": "unknown_job"})
+    job = RESEARCH.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail={"code": "unknown_job"})
+    return JSONResponse(job, headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------- admin (protected)

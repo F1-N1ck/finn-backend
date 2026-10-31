@@ -42,5 +42,47 @@ def fake_fetch_symbol(symbol, now=None):
 llm_adapter.chat = fake_chat
 prices.fetch_symbol = fake_fetch_symbol
 
+
+def install_fake_research():
+    """Generic research with a fake network and fake model. KPITTECH works; every other ticker is 'unknown'."""
+    import time
+    from finn import snapshot
+    from finn.research import jobs, pacer, pipeline
+    from tests import research_fakes as fk
+
+    html = open("tests/fixtures/screener_kpit_reconstructed.html").read()
+    ar_pages = snapshot.load_pages("KPIT_AR_2026")
+    keep = {}
+    for number in range(1, 153):
+        keep[number] = {"page": number, "text": "Filler page " + str(number) + " about nothing in particular."}
+    for number in (4, 56, 107, 110, 149, 152):
+        keep[number] = [p for p in ar_pages if p["page"] == number][0]
+    ar_pdf = fk.make_pdf_from_pages([keep[n] for n in sorted(keep)])
+    call_pdf = fk.make_pdf_from_pages(snapshot.load_pages("KPIT_CONCALL_AUG2026"))
+    ar_url = "https://www.bseindia.com/xml-data/corpfiling/AttachHis/4d2467e3-e28a-472b-8492-7fd9e46e63c4.pdf"
+    call_url = "https://www.bseindia.com/stockinfo/AnnPdfOpen.aspx?Pname=d07f9c52-5c5a-443b-b239-6acd5e94b97a.pdf"
+
+    def slow_page():
+        time.sleep(2)
+        return fk.FakeResponse(200, html.encode())
+
+    routes = {"https://www.screener.in/company/KPITTECH/": slow_page,
+              "https://www.bseindia.com/": fk.FakeResponse(200, b"<html></html>"),
+              ar_url: fk.FakeResponse(200, ar_pdf), call_url: fk.FakeResponse(200, call_pdf)}
+
+    def runner(symbol, config, callback=None):
+        return pipeline.analyze(symbol, config, callback=callback, session=fk.FakeSession(routes),
+                                resolver=fk.public_resolver, chat_fn=fk.make_fake_chat("good"),
+                                pacer=pacer.TokenPacer(10 ** 9))
+
+    os.environ["FINN_CACHE_DIR"] = "/tmp/finn_ui_cache"
+    import shutil
+    shutil.rmtree("/tmp/finn_ui_cache", ignore_errors=True)
+    main.RESEARCH = jobs.ResearchService(main.get_config, fallback_fn=main.snapshot_fallback, runner=runner,
+                                         limiter=jobs.SlidingLimit(1000, 1000))
+
+
+install_fake_research()
+
 if __name__ == "__main__":
     uvicorn.run(main.app, host="127.0.0.1", port=8765, log_level="warning")

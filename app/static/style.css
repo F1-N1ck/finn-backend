@@ -697,3 +697,36 @@ mark {
     border-radius: 18px;
   }
 }
+
+/* ---- generic research (any ticker) ---- */
+h2.section.flush { margin-top: 0; }
+.ticker-row { display: flex; gap: 8px; align-items: stretch; }
+.ticker-row input {
+  flex: 1; min-width: 0; min-height: 48px; padding: 0 12px; font-size: 16px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--text);
+  text-transform: uppercase;
+}
+.ticker-row .btn { width: auto; margin: 0; padding: 0 18px; }
+.progress { list-style: none; margin: 12px 0 0; padding: 0; font-size: 13px; }
+.progress li { display: flex; gap: 8px; padding: 4px 0; align-items: baseline; overflow-wrap: anywhere; }
+.progress .dot { flex: none; width: 1.2em; text-align: center; }
+.progress .running .dot { color: var(--accent); }
+.progress .ok .dot { color: var(--up); }
+.progress .failed .dot, .progress .unverified .dot { color: var(--down); }
+.docs { display: grid; gap: 8px; margin-top: 12px; }
+.doc { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: var(--card); font-size: 13px; overflow-wrap: anywhere; }
+.doc b { display: block; font-size: 14px; margin-bottom: 4px; }
+.doc .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chip.fresh { background: var(--live-bg); color: var(--live); }
+.chip.stale { background: var(--cached-bg); color: var(--cached); }
+.chip.warn { background: var(--high-bg); color: var(--high); }
+.brief-section { margin-top: 16px; }
+.brief-section h3 { font-size: 16px; margin: 0 0 4px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.notfound { background: var(--card); border: 1px dashed var(--line); border-radius: 12px; padding: 10px 12px; font-size: 14px; color: var(--muted); }
+.cite { border-top: 1px solid var(--line); padding: 10px 12px; font-size: 13px; overflow-wrap: anywhere; }
+.cite div { margin-bottom: 4px; }
+.cite blockquote { margin: 6px 0 0; padding: 6px 10px; border-left: 3px solid var(--accent); white-space: pre-wrap; background: var(--bg); border-radius: 0 8px 8px 0; }
+.cite a { color: var(--accent); min-height: 44px; display: inline-block; padding: 8px 0; }
+details.failed { margin-top: 8px; font-size: 13px; color: var(--muted); }
+details.failed summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; }
+.metric { font-weight: 700; font-variant-numeric: tabular-nums; }

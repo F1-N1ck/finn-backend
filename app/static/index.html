@@ -68,7 +68,19 @@
 
     <section id="tab-research" class="tab" role="tabpanel" aria-labelledby="btn-research" hidden>
       <div class="card">
-        <p class="hint">Answers use only the loaded primary documents. Demo documents exist for <strong>KPITTECH</strong> only.</p>
+        <h2 class="section flush">Analyse any NSE company</h2>
+        <p class="hint">Finds the latest annual report and earnings-call transcript, reads them, and writes a short cited brief. Takes 1 to 3 minutes on the free server.</p>
+        <form id="analyze-form" class="ticker-row" autocomplete="off">
+          <input id="ticker-input" type="text" maxlength="20" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="NSE ticker, e.g. PIDILITIND" aria-label="NSE ticker">
+          <button type="submit" id="analyze-btn" class="btn">Analyse</button>
+        </form>
+        <div id="analyze-progress" aria-live="polite"></div>
+      </div>
+      <div id="brief" aria-live="polite"></div>
+
+      <h2 class="section">Saved KPIT demo</h2>
+      <div class="card">
+        <p class="hint">Two fixed questions on KPITTECH documents saved with the app. Cached answers are labelled; Live asks the model now.</p>
         <div id="questions" class="stack"></div>
         <div class="row">
           <span class="label">Mode</span>
