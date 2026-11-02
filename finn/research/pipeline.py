@@ -216,11 +216,20 @@ def get_document(kind, candidates, company_name, session, resolver, tracker, lim
 # ------------------------------------------------------------------ model sections
 
 def call_model(config, messages, max_tokens, pacer, chat_fn, max_wait_s=70.0):
-    estimated = int(sum(len(m["content"]) for m in messages) / 3.4) + max_tokens // 2
+    estimated = int(sum(len(m["content"]) for m in messages) / 3.0) + max_tokens  # providers count max_tokens too
     waited = pacer.wait_for(estimated, max_wait_s=max_wait_s)
     local = copy.copy(config)
     local.max_tokens = max_tokens
-    raw = chat_fn(local, messages)
+    try:
+        raw = chat_fn(local, messages)
+    except llm_adapter.LLMRateLimited as error:
+        # one patient retry: the provider said how long to wait; give up if that is longer than we can afford
+        pause = error.retry_after if error.retry_after is not None else 20.0
+        if pause > max_wait_s - waited:
+            raise
+        SLEEP(pause + 1.0)
+        waited = waited + pause + 1.0
+        raw = chat_fn(local, messages)
     usage = raw.get("usage") or {}
     pacer.record(usage.get("total_tokens") or estimated)
     parsed = grounded_qa.parse_answer_json(raw["text"])
@@ -354,7 +363,10 @@ def run_section(name, config, messages, max_tokens, pacer, chat_fn, builder, tra
         parsed, meta = call_model(config, messages, max_tokens, pacer, chat_fn, max_wait_s=min(70.0, left - 10))
     except llm_adapter.LLMError as error:
         tracker.finish(stage, "failed", "model: " + str(error.code))
-        return unavailable("model_" + str(error.code), "the model call failed; nothing was invented")
+        result = unavailable("model_" + str(error.code), "the model call failed; nothing was invented")
+        result["provider_detail"] = str(error)[:300]  # already stripped of the key by the adapter
+        result["retry_after_s"] = getattr(error, "retry_after", None)
+        return result
     except ValueError:
         tracker.finish(stage, "failed", "model reply was not valid JSON")
         return unavailable("model_bad_json", "the model reply could not be parsed; nothing was invented")
@@ -496,6 +508,9 @@ ERROR_TEXT = {
 def _missing_reason(kind, selection, skipped):
     key = "annual_report_candidates" if kind == "annual_report" else "concall_candidates"
     if len(selection[key]) == 0 and len(skipped) == 0:
+        too_old = [n for n in selection["notes"] if n.startswith("Skipped as too old")]
+        if kind == "concall" and too_old:
+            return "no recent transcript on a trusted host. " + too_old[0]
         listed_but_untrusted = [n for n in selection["notes"] if kind.split("_")[0] in n.lower() or "transcript" in n.lower()]
         if listed_but_untrusted:
             return "none listed on a trusted host; " + listed_but_untrusted[0]
@@ -524,3 +539,4 @@ def limitations(documents, result_sections):
 
 
 PACER = pacer_module.TokenPacer()
+SLEEP = time.sleep

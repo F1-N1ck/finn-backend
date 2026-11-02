@@ -6,6 +6,7 @@ has a fallback that classifies links by their text, and reports diagnostics when
 """
 
 import re
+import time
 from html.parser import HTMLParser
 from urllib.parse import quote, urljoin
 
@@ -211,8 +212,20 @@ def _fallback(result, parser, base_url):
                                        "transcript_url": urljoin(base_url, href), "other_links": []})
 
 
-def select_documents(parsed):
-    """Choose candidate documents, newest first, and note what was skipped and why."""
+MAX_CALL_AGE_MONTHS = 15
+
+
+def _months_old(entry, today):
+    if not entry.get("year"):
+        return None
+    return (today.tm_year - entry["year"]) * 12 + (today.tm_mon - (entry.get("month") or 6))
+
+
+def select_documents(parsed, today=None, max_call_age_months=MAX_CALL_AGE_MONTHS):
+    """Choose candidate documents, newest first, and note what was skipped and why.
+    A transcript older than max_call_age_months is not used as 'management outlook': stale guidance is worse than none."""
+    if today is None:
+        today = time.localtime()
     notes = []
     annual = sorted(parsed["annual_reports"], key=lambda e: e["year"], reverse=True)
     calls = []
@@ -225,6 +238,12 @@ def select_documents(parsed):
                 without_transcript = without_transcript + 1
                 if newest_without is None:
                     newest_without = entry["label"]
+            continue
+        age = _months_old(entry, today)
+        if age is not None and age > max_call_age_months:
+            if not any(n.startswith("Skipped as too old") for n in notes):
+                notes.append("Skipped as too old (over " + str(max_call_age_months) + " months): newest accessible transcript is '"
+                             + str(entry["label"]) + "'. Newer calls may exist on company sites this app does not fetch from.")
             continue
         calls.append(entry)
     if without_transcript > 0:

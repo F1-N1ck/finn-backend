@@ -938,3 +938,43 @@ def test_script_survives_poll_without_status_and_saves_after_each_company(tmp_pa
     assert unexpected[0]["http"] == 502 and "gsk_SECRET123" not in unexpected[0]["body_redacted"]
     assert unexpected[1]["json_keys"] == ["detail"]
     assert len(saved) >= 3
+
+
+def test_old_transcript_is_not_used_as_outlook():
+    parsed = discover.parse_screener(fixture_html(), SCREENER)
+    # pretend today is Nov 2028: the Aug 2026 call is 27 months old
+    selected = discover.select_documents(parsed, today=time.struct_time((2028, 11, 2, 0, 0, 0, 0, 0, 0)))
+    assert selected["concall_candidates"] == []
+    assert any(n.startswith("Skipped as too old") for n in selected["notes"])
+    reason = pipeline._missing_reason("concall", selected, [])
+    assert "no recent transcript" in reason
+    fresh = discover.select_documents(parsed, today=time.struct_time((2026, 11, 2, 0, 0, 0, 0, 0, 0)))
+    assert fresh["concall_candidates"][0]["label"] == "Aug 2026"
+
+
+def test_model_rate_limit_waits_once_then_succeeds(monkeypatch):
+    from finn import llm_adapter
+    slept = []
+    monkeypatch.setattr(pipeline, "SLEEP", lambda s: slept.append(s))
+    state = {"n": 0}
+
+    def chat(config, messages):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise llm_adapter.LLMRateLimited("Rate limited: tpm", status=429, retry_after=12.0)
+        return {"text": '{"claims": []}', "usage": {"total_tokens": 100}, "latency_s": 0.1}
+    parsed, meta = pipeline.call_model(Cfg(), [{"role": "user", "content": "x"}], 100, pacer.TokenPacer(10 ** 9), chat,
+                                       max_wait_s=60)
+    assert state["n"] == 2 and slept == [13.0] and meta["paced_wait_s"] == 13.0
+
+
+def test_model_rate_limit_too_long_is_reported_with_provider_detail():
+    from finn import llm_adapter
+
+    def chat(config, messages):
+        raise llm_adapter.LLMRateLimited("Rate limited: daily tokens used", status=429, retry_after=3000.0)
+    tracker = pipeline.Tracker(None)
+    section = pipeline.run_section("model:x", Cfg(), [{"role": "user", "content": "x"}], 100,
+                                   pacer.TokenPacer(10 ** 9), chat, lambda p: {"status": "ok"}, tracker)
+    assert section["status"] == "unavailable" and section["reason"] == "model_rate_limited"
+    assert "daily tokens" in section["provider_detail"] and section["retry_after_s"] == 3000.0

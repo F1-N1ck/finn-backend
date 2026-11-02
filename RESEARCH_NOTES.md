@@ -45,3 +45,4 @@ scanned_no_text (no OCR), too_slow, partial (page/time cap). Sections: found / n
 - A rupee sign drawn with a font whose code is "H" or backtick is read as the rupee sign (HUL, KPIT). Pidilite's glyph is absent from the PDF text layer, so per-share items there fail the unit check (correct).
 - Citation pages come from the quote's position inside the passage (`page_basis: located_in_passage`).
 - scripts/run_research_tests.py saves after every poll and company; unexpected polls are saved with HTTP status and a redacted body.
+- (round 3) Transcripts older than 15 months are not used as outlook (COFORGE's only accessible call was Feb 2022). One patient retry on model rate limits (waits the provider's retry-after if it fits the time budget); sections now carry `provider_detail` and `retry_after_s` when the model call fails.
