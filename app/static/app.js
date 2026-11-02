@@ -672,7 +672,8 @@ var ERROR_TEXT = {
   source_unreachable: "The document index (Screener) could not be reached. Try again later.",
   company_not_resolved: "The page did not identify a company for that ticker.",
   ticker_mismatch: "The page found belongs to a different NSE symbol.",
-  documents_not_listed: "The company page lists no annual report or earnings-call documents."
+  documents_not_listed: "The company page lists no annual report or earnings-call documents.",
+  job_timeout: "The analysis took too long and was stopped. No result is shown. Try again later."
 };
 
 function describeError(code, fallback) {
@@ -738,8 +739,8 @@ function handleJob(job) {
 }
 
 function pollJob() {
-  if (Date.now() - analyze.startedAt > 12 * 60 * 1000) {
-    showAnalyzeError("Still running after 12 minutes; stopped waiting. Reload and try again.");
+  if (Date.now() - analyze.startedAt > 8 * 60 * 1000) {
+    showAnalyzeError("Still running after 8 minutes; stopped waiting. Reload and try again.");
     setAnalyzeBusy(false);
     return;
   }
@@ -907,6 +908,13 @@ function renderBrief(brief, job) {
   head.appendChild(el("b", null, cached ? "CACHED brief" : "LIVE brief"));
   head.appendChild(el("span", null, brief.label));
   box.appendChild(head);
+  if (brief.outcome && brief.outcome !== "complete") {
+    var warn = el("div", "banner op");
+    var found = (brief.sections_found || []).length;
+    warn.appendChild(el("b", null, brief.outcome === "partial" ? "PARTIAL brief: " + found + " of 3 sections found" : "NO sections could be produced"));
+    warn.appendChild(el("span", null, "Missing sections are marked below with the reason; nothing was filled in."));
+    box.appendChild(warn);
+  }
 
   var company = brief.company || {};
   box.appendChild(el("h2", "section", (company.name || brief.ticker) + " · NSE " + (company.nse_symbol || brief.ticker)));

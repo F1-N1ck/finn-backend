@@ -36,6 +36,7 @@ def limits():
         "extract_s": _int_env("FINN_RESEARCH_EXTRACT_S", 80),
         "max_pages": _int_env("FINN_RESEARCH_MAX_PAGES", 600),
         "deadline_s": _int_env("FINN_RESEARCH_DEADLINE_S", 270),
+        "max_rss_mb": _int_env("FINN_RESEARCH_MAX_RSS_MB", 380),
     }
 
 
@@ -152,7 +153,8 @@ def get_document(kind, candidates, company_name, session, resolver, tracker, lim
     for entry in candidates:
         if attempts >= 2:
             break
-        if tracker.elapsed() > lim["deadline_s"] - 60:
+        left = lim["deadline_s"] - tracker.elapsed()
+        if left < 45:
             skipped.append({"label": entry.get("label"), "state": "deadline_before_fetch"})
             break
         attempts = attempts + 1
@@ -174,41 +176,48 @@ def get_document(kind, candidates, company_name, session, resolver, tracker, lim
             return {"record": record, "pages": cached["pages"]}, skipped
         if safe_fetch.host_of(url) == "www.bseindia.com":
             warm_up_bse(session, resolver)
-        got = safe_fetch.fetch(url, session=session, max_bytes=lim["max_bytes"], total_timeout_s=lim["download_s"],
+        got = safe_fetch.fetch(url, session=session, max_bytes=lim["max_bytes"],
+                               total_timeout_s=min(lim["download_s"], left - 20),
                                expect_pdf=True, resolver=resolver, referer=BSE_HOME)
         if not got["ok"]:
             skipped.append({"label": label, "url": url, "state": got["state"]})
-            tracker.finish(stage, "failed", "download: " + got["state"])
+            tracker.finish(stage, "failed", "download: " + got["state"] + " after " + str(got["seconds"]) + " s")
             continue
-        extracted = extract.extract_pdf(got["data"], max_pages=lim["max_pages"], budget_s=lim["extract_s"])
+        fetched_bytes = got["bytes"]
+        fetched_seconds = got["seconds"]
+        left = lim["deadline_s"] - tracker.elapsed()
+        extracted = extract.extract_pdf(got["data"], max_pages=lim["max_pages"],
+                                        budget_s=max(5, min(lim["extract_s"], left - 40)), max_rss_mb=lim["max_rss_mb"])
+        got = None  # release the downloaded bytes before the next step
         if extracted["state"] not in ("ok", "partial"):
             skipped.append({"label": label, "url": url, "state": extracted["state"]})
-            tracker.finish(stage, "failed", "extraction: " + extracted["state"])
+            tracker.finish(stage, "failed", "extraction: " + extracted["state"] + " after " + str(extracted["seconds"]) + " s")
             continue
         pages = extracted["pages"]
         record = {
             "kind": kind, "title": title.strip(" -"), "label": label, "url": url,
             "host": safe_fetch.host_of(url), "date_label": date_label,
             "date_in_text": find_call_date(pages) if kind == "concall" else None,
-            "fetch": {"source": "fetched_now", "fetched_at": llm_adapter.now_iso(), "bytes": got["bytes"],
-                      "seconds": got["seconds"]},
+            "fetch": {"source": "fetched_now", "fetched_at": llm_adapter.now_iso(), "bytes": fetched_bytes,
+                      "seconds": fetched_seconds},
             "extraction": {"state": extracted["state"], "partial_reason": extracted["partial_reason"],
                            "page_count": extracted["page_count"], "pages_extracted": extracted["pages_extracted"],
                            "pdf_title": extracted["pdf_title"], "pdf_created": extracted["pdf_created"],
-                           "seconds": extracted["seconds"]},
+                           "seconds": extracted["seconds"], "rss_mb_after": extracted.get("rss_mb_after")},
         }
         cache.save("docs", doc_key, {"record": record, "pages": pages})
         tracker.finish(stage, "ok", str(extracted["pages_extracted"]) + " of " + str(extracted["page_count"])
-                       + " pages, " + str(got["bytes"]) + " bytes")
+                       + " pages, " + str(fetched_bytes) + " bytes; download " + str(fetched_seconds)
+                       + " s, extract " + str(extracted["seconds"]) + " s")
         return {"record": record, "pages": pages}, skipped
     return None, skipped
 
 
 # ------------------------------------------------------------------ model sections
 
-def call_model(config, messages, max_tokens, pacer, chat_fn):
-    estimated = int(sum(len(m["content"]) for m in messages) / 3.2) + max_tokens
-    waited = pacer.wait_for(estimated)
+def call_model(config, messages, max_tokens, pacer, chat_fn, max_wait_s=70.0):
+    estimated = int(sum(len(m["content"]) for m in messages) / 3.4) + max_tokens // 2
+    waited = pacer.wait_for(estimated, max_wait_s=max_wait_s)
     local = copy.copy(config)
     local.max_tokens = max_tokens
     raw = chat_fn(local, messages)
@@ -220,13 +229,36 @@ def call_model(config, messages, max_tokens, pacer, chat_fn):
     return parsed, {"latency_s": raw.get("latency_s"), "usage": usage, "paced_wait_s": round(waited, 1)}
 
 
+_QUOTE_MAP = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"', "–": "-", "—": "-"})
+
+
+def page_of_quote(passage, quote):
+    """PDF page where the quote actually sits. A passage can run across a page break, so the page where the
+    passage starts is not always the page of the quote."""
+    marks = passage.get("page_marks")
+    if not marks or len(marks) < 2 or not quote.strip():
+        return passage["page"], "passage_page"
+    tokens = [re.escape(t) for t in quote.translate(_QUOTE_MAP).split()]
+    if not tokens:
+        return passage["page"], "passage_page"
+    match = re.search(r"\s+".join(tokens), passage["text"].translate(_QUOTE_MAP), re.I)
+    if match is None:
+        return passage["page"], "passage_page"
+    page = marks[0][1]
+    for offset, mark_page in marks:
+        if offset <= match.start():
+            page = mark_page
+    return page, "located_in_passage"
+
+
 def _citation(doc, passage, quote):
     record = doc["record"]
+    page, basis = page_of_quote(passage, quote)
     date_text = record.get("date_label") or "date not listed"
     if record.get("date_in_text"):
         date_text = date_text + " (call dated " + record["date_in_text"] + " in the transcript)"
     return {"doc_title": record["title"], "doc_date": date_text, "url": record["url"],
-            "pdf_page": passage["page"], "excerpt": quote, "speaker": passage.get("speaker"),
+            "pdf_page": page, "page_basis": basis, "excerpt": quote, "speaker": passage.get("speaker"),
             "source_id": passage["source_id"]}
 
 
@@ -312,10 +344,14 @@ def not_found(reason):
             "passages": [], "summary": ""}
 
 
-def run_section(name, config, messages, max_tokens, pacer, chat_fn, builder, tracker):
+def run_section(name, config, messages, max_tokens, pacer, chat_fn, builder, tracker, deadline_s=270):
     stage = tracker.start(name)
+    left = deadline_s - tracker.elapsed()
+    if left < 15:
+        tracker.finish(stage, "failed", "skipped: job time limit reached")
+        return unavailable("deadline_exceeded", "the job time limit was reached before this step; nothing was invented")
     try:
-        parsed, meta = call_model(config, messages, max_tokens, pacer, chat_fn)
+        parsed, meta = call_model(config, messages, max_tokens, pacer, chat_fn, max_wait_s=min(70.0, left - 10))
     except llm_adapter.LLMError as error:
         tracker.finish(stage, "failed", "model: " + str(error.code))
         return unavailable("model_" + str(error.code), "the model call failed; nothing was invented")
@@ -401,8 +437,8 @@ def analyze(symbol, config, callback=None, session=None, resolver=None, chat_fn=
             messages = sections.build_messages(prompt, passages,
                                                "Question: What explicit forward-looking statements did management make?")
             result_sections["outlook"] = run_section(
-                "model:outlook", config, messages, 700, pacer, chat_fn,
-                lambda p: text_section(p, passages, docs, note), tracker)
+                "model:outlook", config, messages, 600, pacer, chat_fn,
+                lambda p: text_section(p, passages, docs, note), tracker, lim["deadline_s"])
     else:
         result_sections["outlook"] = not_found("no earnings-call transcript could be retrieved ("
                                                + documents["concall"]["reason"] + ")")
@@ -415,8 +451,8 @@ def analyze(symbol, config, callback=None, session=None, resolver=None, chat_fn=
             messages = sections.build_messages(sections.OVERVIEW_PROMPT, passages,
                                                "Question: What does the company do?")
             result_sections["overview"] = run_section(
-                "model:overview", config, messages, 600, pacer, chat_fn,
-                lambda p: text_section(p, passages, docs), tracker)
+                "model:overview", config, messages, 500, pacer, chat_fn,
+                lambda p: text_section(p, passages, docs), tracker, lim["deadline_s"])
         passages = sections.numbers_passages(ar_pages)
         if len(passages) == 0:
             result_sections["numbers"] = not_found("no page in the extracted annual-report text looks like an income statement")
@@ -424,8 +460,8 @@ def analyze(symbol, config, callback=None, session=None, resolver=None, chat_fn=
             messages = sections.build_messages(sections.NUMBERS_PROMPT, passages,
                                                "Task: report the selected numbers.")
             result_sections["numbers"] = run_section(
-                "model:numbers", config, messages, 800, pacer, chat_fn,
-                lambda p: numbers_section(p, passages, docs), tracker)
+                "model:numbers", config, messages, 600, pacer, chat_fn,
+                lambda p: numbers_section(p, passages, docs), tracker, lim["deadline_s"])
     else:
         reason = "no annual report could be retrieved (" + documents["annual_report"]["reason"] + ")"
         result_sections["overview"] = not_found(reason)
@@ -439,6 +475,9 @@ def analyze(symbol, config, callback=None, session=None, resolver=None, chat_fn=
         "limitations": limitations(documents, result_sections),
         "stages": tracker.public(), "total_seconds": round(tracker.elapsed(), 1), "disclaimer": DISCLAIMER,
     }
+    found = [name for name, section in result_sections.items() if section["status"] == "ok"]
+    brief["outcome"] = "complete" if len(found) == 3 else ("partial" if found else "no_findings")
+    brief["sections_found"] = found
     any_unavailable = any(s["status"] == "unavailable" for s in result_sections.values())
     if not any_unavailable and docs:
         cache.save("brief", key, brief)

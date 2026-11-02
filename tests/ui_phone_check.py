@@ -122,9 +122,10 @@ with sync_playwright() as p:
         check(tag + " unknown ticker explained", "No company page" in page.inner_text("#analyze-progress"))
         page.fill("#ticker-input", "kpittech")
         page.click("#analyze-btn")
-        page.wait_for_selector("#analyze-progress .progress li", timeout=10000)
-        check(tag + " progress list shown while running", page.locator("#analyze-progress .progress li").count() >= 1)
-        check(tag + " button disabled while running", page.locator("#analyze-btn").is_disabled())
+        if width == 390:  # only the first viewport runs live; later ones hit the server cache and finish at once
+            page.wait_for_selector("#analyze-progress .progress li", timeout=10000)
+            check(tag + " progress list shown while running", page.locator("#analyze-progress .progress li").count() >= 1)
+            check(tag + " button disabled while running", page.locator("#analyze-btn").is_disabled())
         page.wait_for_selector("#brief .brief-section", timeout=60000)
         brief_text = page.inner_text("#brief")
         first_view = (width == 390)  # the server cache persists, so the second viewport legitimately gets a cached brief

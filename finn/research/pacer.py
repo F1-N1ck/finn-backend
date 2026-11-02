@@ -9,9 +9,9 @@ class TokenPacer:
     def __init__(self, limit_per_minute=None):
         if limit_per_minute is None:
             try:
-                limit_per_minute = int(os.environ.get("FINN_LLM_TPM", "6500"))
+                limit_per_minute = int(os.environ.get("FINN_LLM_TPM", "7000"))
             except ValueError:
-                limit_per_minute = 6500
+                limit_per_minute = 7000
         self.limit = limit_per_minute
         self.events = []
         self.lock = threading.Lock()

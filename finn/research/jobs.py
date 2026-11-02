@@ -13,6 +13,10 @@ from finn import llm_adapter
 from finn.research import pipeline
 
 
+INSTANCE = uuid.uuid4().hex[:8]  # changes on every process start, so a client can see a restart
+BOOTED_AT = time.time()
+
+
 class ServiceError(Exception):
     def __init__(self, status, code, message):
         Exception.__init__(self, code)
@@ -50,13 +54,14 @@ def _int_env(name, default):
 
 
 class ResearchService:
-    def __init__(self, config_fn, fallback_fn=None, runner=None, limiter=None, max_jobs=30):
+    def __init__(self, config_fn, fallback_fn=None, runner=None, limiter=None, max_jobs=30, hard_limit_s=None):
         self.config_fn = config_fn
         self.fallback_fn = fallback_fn
         self.runner = runner or pipeline.analyze
         self.limiter = limiter or SlidingLimit(_int_env("FINN_ANALYZE_MAX_PER_HOUR", 8),
                                                _int_env("FINN_ANALYZE_MAX_PER_DAY", 20))
         self.max_jobs = max_jobs
+        self.hard_limit_s = hard_limit_s if hard_limit_s is not None else _int_env("FINN_JOB_HARD_LIMIT_S", 420)
         self.jobs = {}
         self.order = []
         self.lock = threading.RLock()
@@ -93,6 +98,9 @@ class ResearchService:
                 raise ServiceError(429, "busy", "another analysis is running; try again in a minute")
             job = self._new_job(symbol, status="running", running=True)
         threading.Thread(target=self._run, args=(job["job_id"], symbol, config), daemon=True).start()
+        watchdog = threading.Timer(self.hard_limit_s, self._expire, args=(job["job_id"],))
+        watchdog.daemon = True
+        watchdog.start()
         return self._public(job)
 
     def get(self, job_id):
@@ -117,6 +125,20 @@ class ResearchService:
             if running:
                 self.running_id = job_id
             return job
+
+    def _expire(self, job_id):
+        """Watchdog: a job that is still running after the hard limit is marked failed, so the page never waits
+        forever and the next analysis can start. The worker thread may still finish; its result is then dropped."""
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None or job["status"] != "running":
+                return
+            job["status"] = "failed"
+            job["error"] = {"code": "job_timeout", "message": "the analysis did not finish within "
+                            + str(self.hard_limit_s) + " s and was stopped; nothing was invented"}
+            job["finished"] = time.time()
+            if self.running_id == job_id:
+                self.running_id = None
 
     def _progress(self, job_id, stages):
         with self.lock:
@@ -149,6 +171,8 @@ class ResearchService:
                 error = None
         with self.lock:
             job = self.jobs.get(job_id)
+            if job is not None and job["status"] != "running":
+                job = None  # the watchdog already closed this job; drop the late result
             if job is not None:
                 job["brief"] = brief
                 job["error"] = error
@@ -162,9 +186,15 @@ class ResearchService:
 
     def _public(self, job):
         out = {"job_id": job["job_id"], "symbol": job["symbol"], "status": job["status"],
-               "stages": job["stages"], "elapsed_s": round((job["finished"] or time.time()) - job["started"], 1)}
-        if job.get("brief") is not None:
-            out["brief"] = job["brief"]
+               "instance": INSTANCE, "stages": job["stages"],
+               "elapsed_s": round((job["finished"] or time.time()) - job["started"], 1)}
+        brief = job.get("brief")
+        if brief is not None:
+            out["brief"] = brief
+            out["outcome"] = brief.get("outcome") or (
+                "snapshot_fallback" if brief.get("answer_source") == "snapshot_fallback" else "complete")
+        elif job["status"] == "failed":
+            out["outcome"] = "failed"
         if job.get("error") is not None:
             out["error"] = job["error"]
         if job.get("diagnostics"):

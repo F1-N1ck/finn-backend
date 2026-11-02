@@ -365,8 +365,8 @@ def kpit_pages():
 def test_numbers_passages_pick_income_statement_pages():
     ar, _ = kpit_pages()
     passages = sections.numbers_passages(ar)
-    assert [p["page"] for p in passages] == [149, 107]
-    assert all("revenue from operations" in p["text"].lower() for p in passages)
+    assert [p["page"] for p in passages] == [149]  # consolidated page only; it already shows the profit line
+    assert "revenue from operations" in passages[0]["text"].lower()
 
 
 def test_outlook_passages_use_management_turns():
@@ -825,3 +825,116 @@ def test_existing_routes_still_work(client):
     assert client.get("/healthz").status_code == 200
     assert client.get("/api/questions").status_code == 200
     assert client.get("/admin/host-check/abc").status_code == 404
+
+
+# ------------------------------------------------------------------ reliability fixes (this round)
+
+def test_page_of_quote_uses_page_marks_not_passage_start():
+    from finn.research import pipeline
+    passage = {"page": 11, "text": "First page text here. " + "x " * 5 + "Second page text with the quoted words.",
+               "page_marks": [(0, 11), (30, 12)]}
+    page, basis = pipeline.page_of_quote(passage, "the quoted words")
+    assert page == 12 and basis == "located_in_passage"
+    page, basis = pipeline.page_of_quote(passage, "First page text")
+    assert page == 11
+    page, basis = pipeline.page_of_quote(passage, "words that are not there")
+    assert page == 11 and basis == "passage_page"
+    page, basis = pipeline.page_of_quote({"page": 5, "text": "abc"}, "abc")
+    assert page == 5 and basis == "passage_page"
+
+
+def test_watchdog_marks_stuck_job_failed_and_frees_the_slot():
+    gate = threading.Event()
+
+    def runner(symbol, config, callback=None):
+        gate.wait(5)
+        return {"ok": True, "brief": brief_stub(), "stages": []}
+    service = jobs.ResearchService(lambda: Cfg(), runner=runner, limiter=jobs.SlidingLimit(100, 1000),
+                                   hard_limit_s=0.2)
+    job = service.submit("TCS")
+    time.sleep(0.6)
+    stopped = service.get(job["job_id"])
+    assert stopped["status"] == "failed" and stopped["error"]["code"] == "job_timeout"
+    assert stopped["outcome"] == "failed"
+    service.submit("INFY")  # slot is free again
+    gate.set()
+    time.sleep(0.2)
+    assert service.get(job["job_id"])["status"] == "failed"  # the late result is dropped
+
+
+def test_public_job_carries_instance_and_outcome():
+    def runner(symbol, config, callback=None):
+        brief = brief_stub()
+        brief["outcome"] = "partial"
+        return {"ok": True, "brief": brief, "stages": []}
+    service = make_service(runner)
+    done = wait_done(service, service.submit("TCS")["job_id"])
+    assert done["instance"] == jobs.INSTANCE and done["outcome"] == "partial"
+
+
+def test_plain_h_is_not_rewritten_when_font_is_not_a_rupee_font():
+    import pymupdf
+    from finn.research import extract
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((20, 40), "H", fontsize=10)
+    page.insert_text((60, 40), "crores", fontsize=10)
+    # the built-in font is not a rupee font, so nothing may be replaced here
+    assert extract.page_text(doc[0]).split()[0] == "H"
+
+
+def test_year_alias_accepts_short_and_long_year():
+    from finn import grounded_qa
+    assert grounded_qa.year_alias_in("2027", {"27"})
+    assert grounded_qa.year_alias_in("27", {"2027"})
+    assert not grounded_qa.year_alias_in("2028", {"27"})
+
+
+def test_script_survives_poll_without_status_and_saves_after_each_company(tmp_path, monkeypatch):
+    import importlib.util
+    import http.server
+    import json as _json
+    spec = importlib.util.spec_from_file_location("run_tests", os.path.join(os.path.dirname(__file__), "..", "scripts", "run_research_tests.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    state = {"polls": 0}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _send(self, code, payload, raw=None):
+            data = raw if raw is not None else _json.dumps(payload).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self._send(202, {"job_id": "abcdef012345", "status": "running", "instance": "i1"})
+
+        def do_GET(self):
+            state["polls"] += 1
+            if state["polls"] == 1:
+                self._send(502, None, raw=b"<html>Bad gateway gsk_SECRET123</html>")
+            elif state["polls"] == 2:
+                self._send(200, {"detail": {"code": "weird"}})
+            else:
+                self._send(200, {"job_id": "abcdef012345", "status": "failed", "outcome": "failed", "instance": "i1",
+                                 "stages": [], "elapsed_s": 1.0, "error": {"code": "job_timeout", "message": "x"}})
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = "http://127.0.0.1:" + str(server.server_address[1])
+    saved = []
+    record, brief = module.run_one(base, "COFORGE", 30, 0.05, lambda: saved.append(1))
+    server.shutdown()
+    assert record["outcome"] == "failed" and brief is None
+    unexpected = [p for p in record["polls"] if p.get("unexpected")]
+    assert len(unexpected) == 2
+    assert unexpected[0]["http"] == 502 and "gsk_SECRET123" not in unexpected[0]["body_redacted"]
+    assert unexpected[1]["json_keys"] == ["detail"]
+    assert len(saved) >= 3

@@ -231,7 +231,9 @@ def analyze_status(job_id: str):
         raise HTTPException(status_code=404, detail={"code": "unknown_job"})
     job = RESEARCH.get(job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail={"code": "unknown_job"})
+        raise HTTPException(status_code=404, detail={
+            "code": "unknown_job", "instance": research_jobs.INSTANCE,
+            "message": "no such job on this server instance; the free server may have restarted, so submit again"})
     return JSONResponse(job, headers={"Cache-Control": "no-store"})
 
 

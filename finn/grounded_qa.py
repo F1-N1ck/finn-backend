@@ -149,7 +149,16 @@ def numbers_in(text):
     return cleaned
 
 
-def check_claims(parsed, passages):
+def year_alias_in(number, source_numbers):
+    """A source that says full year '27 supports a claim that says 2027, and the other way round."""
+    if len(number) == 4 and number[:2] in ("19", "20"):
+        return number[2:] in source_numbers
+    if len(number) == 2:
+        return ("20" + number) in source_numbers or ("19" + number) in source_numbers
+    return False
+
+
+def check_claims(parsed, passages, year_aliases=False):
     by_id = {}
     all_numbers = set()
     for passage in passages:
@@ -174,6 +183,8 @@ def check_claims(parsed, passages):
         missing = []
         for number in numbers_in(text):
             if number not in source_numbers:
+                if year_aliases and year_alias_in(number, source_numbers):
+                    continue
                 missing.append(number)
         row["numbers_missing_from_cited_source"] = missing
         row["auto_pass"] = (row["source_exists"] and row["quote_verbatim_in_source"] and len(missing) == 0)

@@ -58,30 +58,56 @@ def _strip_headers(pages):
     return cleaned
 
 
-def management_surnames(pages):
-    surnames = set()
+TITLE_MGMT_RE = re.compile(r"chief|\bceo\b|\bcfo\b|\bcoo\b|\bcto\b|managing director|\bmd\b|chairman|president|director|"
+                           r"\bhead\b|company secretary|\bfinance\b|vp\b", re.I)
+TITLE_OUTSIDE_RE = re.compile(r"securities|research|analyst|capital|broking|equities|moderator|bank|asset management", re.I)
+LIST_HEADER_RE = re.compile(r"speakers|management|panelists|participants|company representatives|from the company", re.I)
+LIST_ENTRY_RE = re.compile(r"(?:MR|MS|MRS|DR|SHRI|SMT)\.?\s+([A-Z][A-Za-z\.\- ]{2,40}?)\s+[–\-—:]\s+([^\n]{3,160})", re.I)
+
+
+def speaker_roles(pages):
+    """Return {surname_lower: 'management' | 'host'} read from the speaker list near the top of the call.
+
+    Two layouts are understood: 'MANAGEMENT: MR. X - TITLE ... MODERATOR: ...' (older KPIT/Pidilite style) and a
+    'Speakers:' list of 'Mr./Ms. First Last - Title' lines (HUL style). Investor-relations staff who read out
+    questions are 'host', not management. Anything not listed stays an analyst."""
+    roles = {}
     for page in pages[:4]:
-        text = re.sub(r"\s+", " ", page["text"])
-        index = text.find("MANAGEMENT")
-        if index == -1:
+        text = page["text"]
+        position = LIST_HEADER_RE.search(text)
+        if position is None:
             continue
-        block = text[index:index + 1500]
-        stop = block.find("MODERATOR")
-        if stop != -1:
-            block = block[:stop]
-        for match in re.finditer(r"(?:MR|MS|MRS|DR)\.?\s+([A-Z][A-Z\.\- ]+?)\s+[–\-]", block):
+        block = text[position.start():position.start() + 3000]
+        stop = re.search(r"MODERATOR\s*:", block)
+        if stop is not None:
+            block = block[:stop.start()]
+        for match in LIST_ENTRY_RE.finditer(block):
             words = match.group(1).split()
-            if len(words) > 0:
-                surnames.add(words[-1].lower())
-        if len(surnames) > 0:
+            title = match.group(2)
+            if len(words) == 0:
+                continue
+            surname = words[-1].lower().strip(".")
+            if TITLE_OUTSIDE_RE.search(title):
+                continue
+            if re.search(r"investor relations", title, re.I):
+                roles[surname] = "host"
+            elif TITLE_MGMT_RE.search(title):
+                roles[surname] = "management"
+        if roles:
             break
-    return surnames
+    return roles
+
+
+def management_surnames(pages):
+    """Kept for the KPIT demo and tests: the set of management surnames."""
+    roles = speaker_roles(pages)
+    return set(name for name in roles if roles[name] == "management")
 
 
 def split_turns(pages):
     """Return a list of turns: speaker, role, page (where the turn starts), text,
     and page_marks = [(char_offset, page)] so a window can be mapped back to a page."""
-    surnames = management_surnames(pages)
+    roles_by_surname = speaker_roles(pages)
     cleaned = _strip_headers(pages)
     turns = []
     current = None
@@ -99,7 +125,9 @@ def split_turns(pages):
                 last = name.split()[-1].lower()
                 if name.lower() == "moderator":
                     role = "moderator"
-                elif last in surnames:
+                elif roles_by_surname.get(last) == "host":
+                    role = "host"
+                elif roles_by_surname.get(last) == "management":
                     role = "management"
                 else:
                     role = "analyst"
@@ -138,7 +166,7 @@ def _window_score(text, terms):
     return score
 
 
-ROLE_MULTIPLIER = {"management": 1.5, "analyst": 0.5, "moderator": 0.0}
+ROLE_MULTIPLIER = {"management": 1.5, "analyst": 0.5, "moderator": 0.0, "host": 0.0}
 
 
 def retrieve_turns(pages, terms, top_k=4, window=1400, step=400):
@@ -165,6 +193,14 @@ def retrieve_turns(pages, terms, top_k=4, window=1400, step=400):
     for rank, item in enumerate(candidates[:top_k]):
         turn = turns[item[1]]
         start = item[2]
+        raw = turn["text"][start:start + window]
+        lead = len(raw) - len(raw.lstrip())
+        shown = raw.strip()
+        marks = [(0, _page_at(turn, start + lead))]
+        for mark_offset, mark_page in turn["page_marks"]:
+            relative = mark_offset - start - lead
+            if 0 < relative < len(shown):
+                marks.append((relative, mark_page))
         passages.append({
             "source_id": "S" + str(rank + 1),
             "page": _page_at(turn, start),
@@ -172,6 +208,7 @@ def retrieve_turns(pages, terms, top_k=4, window=1400, step=400):
             "role": turn["role"],
             "char_start": start,
             "score": round(item[0], 2),
-            "text": turn["text"][start:start + window].strip(),
+            "text": shown,
+            "page_marks": marks,
         })
     return passages

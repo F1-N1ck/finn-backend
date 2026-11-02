@@ -35,3 +35,13 @@ scanned_no_text (no OCR), too_slow, partial (page/time cap). Sections: found / n
 - Mechanical checks do not verify meaning. Page numbers are PDF indexes (KPIT AR spreads differ from printed pages).
 - Disk cache lives in /tmp and is lost on restart; free instance spins down after ~15 min idle.
 - NSE announcement/attachment endpoints were slow or timing out from Render, so exchange discovery is not used.
+
+## Reliability changes (2026-11-01, second round)
+- Job hard limit (FINN_JOB_HARD_LIMIT_S, default 420 s): a stuck job becomes `failed / job_timeout`; the slot is freed.
+- Pipeline deadline (FINN_RESEARCH_DEADLINE_S, default 270 s): fetch/extract/model steps get what is left; steps skipped for time are reported, not hidden.
+- Model-wait cap: the token pacer waits at most 70 s per call, then the section is marked unavailable.
+- `outcome` on every job/brief: complete | partial | no_findings | snapshot_fallback | failed. The page shows a PARTIAL banner.
+- Every poll response carries `instance`; an unknown job returns 404 with a note that the free server may have restarted.
+- A rupee sign drawn with a font whose code is "H" or backtick is read as the rupee sign (HUL, KPIT). Pidilite's glyph is absent from the PDF text layer, so per-share items there fail the unit check (correct).
+- Citation pages come from the quote's position inside the passage (`page_basis: located_in_passage`).
+- scripts/run_research_tests.py saves after every poll and company; unexpected polls are saved with HTTP status and a redacted body.

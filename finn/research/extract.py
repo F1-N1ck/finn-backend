@@ -10,6 +10,40 @@ import time
 MIN_TEXT_CHARS = 30
 
 
+def rss_mb():
+    """Resident memory of this process in MB (Linux only; None elsewhere)."""
+    try:
+        with open("/proc/self/status") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024.0, 1)
+    except Exception:
+        pass
+    return None
+
+
+def page_text(page):
+    """Page text. Annual reports often draw the rupee sign with a special font whose character code is
+    'H' or a backtick; on pages that use such a font, that character is replaced with the real rupee sign."""
+    try:
+        names = " ".join(str(font[3]) for font in page.get_fonts()).lower()
+    except Exception:
+        names = ""
+    if "rupee" not in names:
+        return page.get_text("text")
+    lines = []
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            parts = []
+            for span in line["spans"]:
+                text = span["text"]
+                if "rupee" in str(span.get("font", "")).lower() and text.strip() in ("H", "`"):
+                    text = text.replace(text.strip(), "₹")
+                parts.append(text)
+            lines.append("".join(parts))
+    return "\n".join(lines) + "\n"
+
+
 def _pdf_date(raw):
     if not raw:
         return None
@@ -19,11 +53,11 @@ def _pdf_date(raw):
     return None
 
 
-def extract_pdf(data, max_pages=600, budget_s=90.0):
+def extract_pdf(data, max_pages=600, budget_s=90.0, max_rss_mb=None):
     """Return {"state", "pages", "page_count", ...}. Never raises.
 
     state: ok | partial | scanned_no_text | encrypted | malformed_pdf | empty | too_slow
-    partial_reason (when partial): time_cap | page_cap | unreadable_pages
+    partial_reason (when partial): time_cap | page_cap | memory_cap | unreadable_pages
     """
     started = time.monotonic()
     info = {"state": "malformed_pdf", "pages": [], "page_count": 0, "pages_extracted": 0,
@@ -62,8 +96,13 @@ def extract_pdf(data, max_pages=600, budget_s=90.0):
         if time.monotonic() - started > budget_s:
             info["partial_reason"] = "time_cap"
             break
+        if max_rss_mb and index % 25 == 0:
+            current = rss_mb()
+            if current is not None and current > max_rss_mb:
+                info["partial_reason"] = "memory_cap"
+                break
         try:
-            text = document[index].get_text("text")
+            text = page_text(document[index])
         except Exception:
             info["unreadable_pages"] = info["unreadable_pages"] + 1
             continue
@@ -75,6 +114,7 @@ def extract_pdf(data, max_pages=600, budget_s=90.0):
     except Exception:
         pass
     info["pages"] = pages
+    info["rss_mb_after"] = rss_mb()
     info["pages_extracted"] = len(pages)
     info["seconds"] = round(time.monotonic() - started, 2)
 
@@ -82,7 +122,7 @@ def extract_pdf(data, max_pages=600, budget_s=90.0):
         info["state"] = "empty"
         return info
     if len(pages) == 0:
-        info["state"] = "too_slow" if info["partial_reason"] == "time_cap" else "malformed_pdf"
+        info["state"] = "too_slow" if info["partial_reason"] in ("time_cap", "memory_cap") else "malformed_pdf"
         return info
     if with_text / float(len(pages)) < 0.2:
         info["state"] = "scanned_no_text"
