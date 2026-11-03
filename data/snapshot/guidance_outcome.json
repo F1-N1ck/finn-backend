@@ -1,0 +1,39 @@
+{
+ "verified_by": "Read by hand against the PDFs on 3 Nov 2026 (quote, page, number, unit, period, scope). Automatic checks only confirm the quotes below are verbatim in the stored page text.",
+ "not_verified": "That the two links are byte-identical to the PDFs read (matched by title and filing date). Anything not quoted below.",
+ "examples": [
+  {
+   "id": "HINDUNILVR-ebitda-margin-range",
+   "symbol": "HINDUNILVR",
+   "company": "Hindustan Unilever",
+   "title": "EBITDA margin: guided range vs the next reported quarter",
+   "guidance": {
+    "source_id": "HUL_MAY2026",
+    "pdf_page": 14,
+    "quote": "we expect the mid-term margin guidance to remain around our current guided range of 22.5% to 23.5%",
+    "metric": {"key": "ebitda_margin", "label": "EBITDA margin", "basis": "inferred",
+               "basis_note": "This sentence says 'margin'. The same call (PDF page 4) calls EBITDA margin 'at the higher end of our guidance'."},
+    "period": {"key": "medium_term", "label": "medium term (the speaker also calls it 'a full-year medium-term guidance')"},
+    "unit": {"key": "percent", "label": "% (of revenue)"},
+    "scope": {"key": "not_stated", "label": "not stated in the cited sentence"},
+    "low": 22.5, "high": 23.5,
+    "extra_quotes": [
+     {"pdf_page": 4, "quote": "EBITDA margin at 23.7%, coming in at the higher end of our guidance"},
+     {"pdf_page": 35, "quote": "The range guidance we give is for the medium term and not necessarily just for the next quarter and that's the way for you to think about it, is that guidance is a full-year medium-term guidance"}
+    ]
+   },
+   "outcome": {
+    "source_id": "HUL_AUG2026",
+    "pdf_page": 6,
+    "quote": "delivering EBITDA Margin of 23%, which was within the guided range",
+    "metric": {"key": "ebitda_margin", "label": "EBITDA margin", "basis": "stated", "basis_note": ""},
+    "period": {"key": "q1_fy27", "label": "quarter ended 30 June 2026 (Q1 FY27)"},
+    "unit": {"key": "percent", "label": "% (of revenue)"},
+    "scope": {"key": "not_stated", "label": "not stated in the cited sentence"},
+    "value": 23.0,
+    "value_note": "Stated as a rounded '23%'."
+   },
+   "management_framing": "Management itself calls the quarter 'within the guided range' (PDF page 6 of the August call). That is their description, not a like-for-like test."
+  }
+ ]
+}

@@ -92,7 +92,8 @@ def build_filings(raw_announcements):
             tier, reason = tier_for(item["desc"], item["text"])
             row = {"symbol": symbol, "at": parse_time(item["an_dt"]).isoformat(), "desc": item["desc"],
                    "text": item["text"], "tier": tier, "tier_reason": reason, "url": item.get("file"),
-                   "dup_count": 1}
+                   "dup_count": 1, "source": item.get("source", "snapshot"),
+                   "fetched_utc": item.get("fetched_utc")}
             seen[key] = row
             filings.append(row)
     filings.sort(key=lambda row: row["at"], reverse=True)
@@ -107,14 +108,36 @@ def research_symbols(questions):
     return found
 
 
-def build_digest(directory=None, questions=()):
+def _empty_note(symbol, status, meta):
+    """One honest sentence for a symbol with no filings in view. Says which kind of 'nothing' it is."""
+    state = status["state"]
+    if state == "valid_empty":
+        newest = status.get("newest_earlier")
+        return ("No filings in the last 7 days. Checked live on NSE at " + status["fetched_utc"] + "; NSE does list "
+                "earlier filings for this symbol" + (" (newest " + newest + ")." if newest else "."))
+    if state == "ambiguous_empty":
+        return ("NSE returned nothing for this symbol, even over 90 days. NSE also returns nothing for unknown "
+                "symbols, so this cannot be read as 'no filings'.")
+    if state in ("failed_snapshot", "stale_live"):
+        return "The live refresh failed for this symbol (" + str(status.get("detail") or "no detail") + ")."
+    check = meta.get("empty_window_checks", {}).get(symbol)
+    if check:
+        return ("No filings in the snapshot window. Checked: " + str(check["count_since_01_08_2026"]) +
+                " filings since 1 Aug 2026, newest " + check["newest_filing"][:11] + ".")
+    return None
+
+
+def build_digest(directory=None, questions=(), live_state=None, running_status=None):
+    from finn import announcements  # late import: announcements imports this module
     directory = directory or snapshot.snapshot_dir()
     raw_ann = _load_json("raw_announcements.json", directory)
     raw_px = _load_json("raw_prices.json", directory)
     meta = _load_json("digest_meta.json", directory)
     if raw_ann is None or raw_px is None or meta is None:
         return None
-    filings = build_filings(raw_ann)
+    snapshot_fetched = meta["announcements"]["fetched_utc"]
+    merged, statuses = announcements.merge_into_raw(raw_ann, live_state)
+    filings = build_filings(merged)
     with_research = research_symbols(questions)
     portfolio = []
     for symbol in PORTFOLIO:
@@ -126,20 +149,31 @@ def build_digest(directory=None, questions=()):
             if stats:
                 entry.update(stats)
         mine = [f for f in filings if f["symbol"] == symbol]
+        status = statuses.get(symbol, {"state": "snapshot"})
         entry["filings_count"] = len(mine)
         entry["filings_high"] = len([f for f in mine if f["tier"] == "high"])
-        if len(mine) == 0 and symbol in meta.get("empty_window_checks", {}):
-            check = meta["empty_window_checks"][symbol]
-            entry["no_filings_note"] = ("No filings in the window. Checked: " + str(check["count_since_01_08_2026"]) +
-                                        " filings since 1 Aug 2026, newest " + check["newest_filing"][:11] + ".")
+        entry["filings_state"] = status["state"]
+        if len(mine) == 0 or status["state"] in ("valid_empty", "ambiguous_empty"):
+            note = _empty_note(symbol, status, meta)
+            if note:
+                entry["no_filings_note"] = note
         portfolio.append(entry)
+    summary = announcements.summarise(live_state, statuses, snapshot_fetched, running_status)
+    as_of = summary["last_success_utc"] or snapshot_fetched
+    if summary["last_success_utc"]:
+        label = ("FILINGS: NSE API, last successful refresh " + summary["last_success_utc"] + " (" + summary["mode"] +
+                 "); symbols not refreshed show the " + snapshot_fetched + " snapshot | prices fetched " +
+                 meta["prices"]["fetched_utc"] + " (Yahoo), last bar " + meta["prices"]["last_bar"])
+    else:
+        label = ("SNAPSHOT | filings fetched " + snapshot_fetched + " (NSE API) | prices fetched " +
+                 meta["prices"]["fetched_utc"] + " (Yahoo), last bar " + meta["prices"]["last_bar"] +
+                 " | fetched via the builder's browser, not live")
     return {
-        "source_type": "snapshot",
-        "label": ("SNAPSHOT | filings fetched " + meta["announcements"]["fetched_utc"] + " (NSE API) | prices fetched " +
-                  meta["prices"]["fetched_utc"] + " (Yahoo), last bar " + meta["prices"]["last_bar"] +
-                  " | fetched via the builder's browser, not live"),
-        "as_of_utc": meta["announcements"]["fetched_utc"],
+        "source_type": "snapshot" if summary["mode"] == "snapshot" else "live_filings",
+        "label": label,
+        "as_of_utc": as_of,
         "meta": meta,
+        "filings_status": summary,
         "portfolio": portfolio,
         "filings": filings,
     }

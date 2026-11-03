@@ -730,3 +730,33 @@ h2.section.flush { margin-top: 0; }
 details.failed { margin-top: 8px; font-size: 13px; color: var(--muted); }
 details.failed summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; }
 .metric { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* ---- round 10: filings freshness, research-this-change, guidance vs outcome */
+.fstatus { margin-bottom: 12px; font-size: 13px; overflow-wrap: anywhere; }
+.fstatus .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; }
+.fstatus .when { color: var(--muted); font-size: 12px; }
+.fstatus p { margin: 6px 0; }
+.fstatus progress { width: 100%; height: 10px; margin: 6px 0; }
+.fstatus .btn { margin-top: 6px; }
+.fstatus details { margin-top: 8px; }
+.fstatus details summary { min-height: 40px; display: flex; align-items: center; cursor: pointer; }
+.fstatus ul.sym { list-style: none; margin: 0; padding: 0; font-size: 12px; }
+.fstatus ul.sym li { padding: 4px 0; border-top: 1px solid var(--line); }
+.chip.live { background: var(--live-bg); color: var(--live); }
+.chip.snapshot { background: var(--cached-bg); color: var(--cached); }
+.chip.failed { background: var(--high-bg); color: var(--high); }
+.btn.small { min-height: 44px; width: auto; padding: 0 14px; font-size: 14px; margin-top: 8px; }
+.btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+.fctx { border: 1px solid var(--accent); border-radius: 12px; padding: 10px 12px; margin-bottom: 12px; overflow-wrap: anywhere; }
+.fctx h3 { margin: 0 0 6px; font-size: 14px; }
+.fctx .row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.gblock { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: var(--card); overflow-wrap: anywhere; }
+.gblock h3 { margin: 0 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.gblock blockquote { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--line); }
+.gfields { list-style: none; margin: 6px 0; padding: 0; font-size: 12px; color: var(--muted); }
+.gfields b { color: var(--text); }
+.gverdict { border-radius: 12px; padding: 10px 12px; margin: 8px 0; font-size: 13px; background: var(--cached-bg); color: var(--cached); }
+.gverdict.ok { background: var(--live-bg); color: var(--live); }
+.gverdict b { display: block; font-size: 14px; margin-bottom: 4px; }
+.gverdict ul { margin: 4px 0 0 18px; padding: 0; }
+.stale-note { border: 1px dashed var(--cached); }

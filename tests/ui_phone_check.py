@@ -43,9 +43,14 @@ with sync_playwright() as p:
                                       is_mobile=True, has_touch=True, color_scheme=scheme)
         page = context.new_page()
         errors = []
-        page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "422" not in m.text and "404" not in m.text else None)
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "422" not in m.text and "404" not in m.text and "ERR_FAILED" not in m.text else None)
         page.on("pageerror", lambda e: errors.append(str(e)))
         tag = str(width) + scheme
+        page.request.post(BASE + "/__test/reset")
+        # baseline checks run on the snapshot: block the page's automatic filings refresh until we test it
+        page.route("**/api/filings/refresh", lambda route: route.fulfill(
+            status=202, content_type="application/json",
+            body='{"running":false,"progress":null,"started":false,"reason":"blocked_by_test"}'))
         page.goto(BASE)
         page.wait_for_selector("#portfolio .stock")
         check(tag + " status says Snapshot, not live", "Snapshot, not live" in page.inner_text("#status"), page.inner_text("#status")[:90])
@@ -150,9 +155,76 @@ with sync_playwright() as p:
         page.click("#btn-digest")
         page.click("#refresh-btn")
         page.wait_for_selector("#status.live")
-        check(tag + " live refresh switches status to LIVE", "LIVE prices" in page.inner_text("#status"))
+        check(tag + " live refresh switches status to LIVE", "PRICES: LIVE" in page.inner_text("#status"))
+        check(tag + " live prices do not make filings look live", "SNAPSHOT" in page.inner_text("#filings-status") and "does not refresh filings" in page.inner_text("#status"), page.inner_text("#filings-status")[:80])
         check(tag + " live refresh note", "16 of 16" in page.inner_text("#refresh-note"), page.inner_text("#refresh-note"))
         page.screenshot(path=SHOTS + "/" + tag + "_digest_live.png")
+
+        # ---- filings freshness: baseline, real refresh, states, failure keeps dated data
+        fs_text = page.inner_text("#filings-status")
+        check(tag + " filings block: SNAPSHOT, not live, dated", "SNAPSHOT" in fs_text and "not live" in fs_text and "31 Oct" in fs_text, fs_text[:140])
+        page.unroute("**/api/filings/refresh")
+        page.click("#filings-btn")
+        page.wait_for_selector("#filings-status progress")
+        check(tag + " refresh shows progress", "of 16 symbols" in page.inner_text("#filings-status"), page.inner_text("#filings-status")[:160])
+        page.screenshot(path=SHOTS + "/" + tag + "_filings_progress.png")
+        page.wait_for_function("document.querySelector('#filings-status .chip') && document.querySelector('#filings-status .chip').innerText.indexOf('PARTLY') >= 0", timeout=40000)
+        fs_text = page.inner_text("#filings-status")
+        check(tag + " partial refresh says 15 of 16 updated and names SBIN", "15 of 16" in fs_text and "SBIN" in fs_text, fs_text[:200])
+        check(tag + " last successful update time shown", "Last successful update" in fs_text)
+        page.click("#filings-status summary")
+        per = page.inner_text("#filings-status")
+        check(tag + " per-symbol states distinguished",
+              "TCS: live check: no filings in 7 days" in per and "ICICIBANK: live check: empty, cannot be verified" in per
+              and "SBIN: refresh failed, snapshot shown" in per and "ITC: live, filings found" in per, per[-420:])
+        check(tag + " new live HIGH filing is an alert, labelled live", "ITC" in page.inner_text("#alerts") and page.locator("#alerts .chip.live").count() >= 1)
+        check(tag + " live prices label unchanged by filings refresh", "PRICES: LIVE" in page.inner_text("#status"))
+        page.screenshot(path=SHOTS + "/" + tag + "_filings_partial.png")
+        page.click("#portfolio .stock[data-symbol='TCS']")
+        check(tag + " TCS sheet: valid empty window checked live", "Checked live" in page.inner_text("#sheet-content") and "No filings in the last 7 days" in page.inner_text("#sheet-content"), page.inner_text("#sheet-content")[-300:])
+        page.click("#sheet-close")
+        page.click("#portfolio .stock[data-symbol='SBIN']")
+        check(tag + " SBIN sheet: source failure, not 'no filings'", "live refresh failed" in page.inner_text("#sheet-content"), page.inner_text("#sheet-content")[-300:])
+        page.click("#sheet-close")
+        page.route("**/api/filings/refresh", lambda route: route.abort())
+        page.click("#filings-btn")
+        page.wait_for_function("document.querySelector('#filings-status').innerText.indexOf('Could not reach the server') >= 0", timeout=15000)
+        check(tag + " failed refresh keeps dated data", "Last successful update" in page.inner_text("#filings-status") and "PARTLY" in page.inner_text("#filings-status"))
+        page.unroute("**/api/filings/refresh")
+
+        # ---- Research this change
+        page.click("#portfolio .stock[data-symbol='KPITTECH']")
+        sheet_btns = page.locator("#sheet-content button[data-research='KPITTECH']")
+        check(tag + " filing card in sheet has Research this change", sheet_btns.count() >= 1)
+        sheet_btns.first.click()
+        check(tag + " research tab opens with ticker prefilled", page.locator("#tab-research").is_visible() and page.input_value("#ticker-input") == "KPITTECH")
+        ctx_text = page.inner_text("#filing-context")
+        check(tag + " selected filing and its context shown", "Researching this change: KPITTECH" in ctx_text and "FAKE live filing for KPITTECH" in ctx_text and "does not read its PDF" in ctx_text, ctx_text[:160])
+        check(tag + " filing link is https to NSE archive", page.locator("#filing-context a").first.get_attribute("href").startswith("https://nsearchives.nseindia.com/"))
+        page.click("#ctx-analyse")
+        page.wait_for_function("document.querySelector('#brief').innerText.indexOf('About the filing you came from') >= 0", timeout=60000)
+        check(tag + " brief says the filing is newer than its documents", "is newer than the newest document" in page.inner_text("#brief"), page.inner_text("#brief")[:300])
+        page.screenshot(path=SHOTS + "/" + tag + "_research_change.png", full_page=True)
+        check(tag + " no overflow (research this change)", no_overflow(page))
+
+        # ---- failed analysis keeps the dated saved result
+        page.route("**/api/analyze", lambda route: route.abort())
+        page.click("#analyze-btn")
+        page.wait_for_function("document.querySelector('#brief') && document.querySelector('#brief').innerText.indexOf('SAVED ON THIS DEVICE') >= 0", timeout=30000)
+        check(tag + " failed analysis shows error and dated saved result", "Could not reach the server" in page.inner_text("#analyze-progress") and "SAVED ON THIS DEVICE" in page.inner_text("#brief") and "KPIT Technologies Ltd" in page.inner_text("#brief"))
+        page.unroute("**/api/analyze")
+
+        # ---- guidance vs outcome
+        page.wait_for_selector("#guidance .gverdict")
+        g_text = page.inner_text("#guidance")
+        check(tag + " guidance example: not directly comparable, with reasons",
+              "Not directly comparable" in g_text and "period: different period" in g_text and "scope:" in g_text, g_text[:200])
+        check(tag + " guidance example cites both sources with page numbers", g_text.count("PDF page") >= 2 and page.locator("#guidance a").count() >= 2)
+        check(tag + " both quotes verified verbatim", g_text.count("quote verbatim in stored page") == 2)
+        check(tag + " no overflow (guidance)", no_overflow(page))
+        page.locator("#guidance").scroll_into_view_if_needed()
+        page.screenshot(path=SHOTS + "/" + tag + "_guidance.png", full_page=True)
+        page.click("#btn-digest")
 
         bad = small_targets(page)
         check(tag + " tap targets >= 40px", len(bad) == 0, ", ".join(bad[:6]))

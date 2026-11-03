@@ -10,8 +10,50 @@ var state = {
   moveThreshold: 3,
   questions: [],
   selectedQuestion: null,
-  mode: "cached"
+  mode: "cached",
+  focusFiling: null,
+  filingsPolling: false,
+  autoRefreshed: false,
+  guidanceLoaded: false
 };
+
+// Network helper: every call has a timeout and a few quick retries. The 3 Nov measurements showed waits of
+// 60 s and 120 s that were connection set-up timeouts, not slow answers (RESEARCH_NOTES.md, round 10), and
+// the server's submit and refresh endpoints are safe to repeat.
+function fetchJson(url, options, timeoutMs, tries) {
+  var attempt = 0;
+  function once() {
+    attempt = attempt + 1;
+    var controller = new AbortController();
+    var timer = window.setTimeout(function () { controller.abort(); }, timeoutMs);
+    var opts = Object.assign({}, options || {}, { signal: controller.signal });
+    return fetch(url, opts)
+      .then(function (response) {
+        window.clearTimeout(timer);
+        return response.json().then(function (body) {
+          return { ok: response.ok, status: response.status, body: body };
+        }, function () {
+          return { ok: response.ok, status: response.status, body: {} };
+        });
+      })
+      .catch(function (error) {
+        window.clearTimeout(timer);
+        if (attempt < tries) {
+          return new Promise(function (resolve) { window.setTimeout(resolve, 1000); }).then(once);
+        }
+        throw error;
+      });
+  }
+  return once();
+}
+
+function storeGet(key) {
+  try { return window.localStorage.getItem(key); } catch (e) { return null; }
+}
+
+function storeSet(key, value) {
+  try { window.localStorage.setItem(key, value); return true; } catch (e) { return false; }
+}
 
 function el(tag, className, text) {
   var node = document.createElement(tag);
@@ -90,28 +132,40 @@ function filingsInWindow() {
 }
 
 function loadDigest() {
-  fetch("/api/digest")
-    .then(function (response) {
-      if (!response.ok) {
-        throw new Error("HTTP " + response.status);
+  return fetchJson("/api/digest", {}, 15000, 3)
+    .then(function (result) {
+      if (!result.ok) {
+        throw new Error("HTTP " + result.status);
       }
-      return response.json();
-    })
-    .then(function (data) {
-      state.digest = data;
+      state.digest = result.body;
       renderAll();
+      var fs = state.digest.filings_status;
+      if (fs && fs.running) {
+        pollFilings();
+      } else {
+        maybeAutoRefreshFilings();
+      }
     })
     .catch(function (error) {
+      if (state.digest) {
+        // keep what is on screen, dated, and say the reload failed
+        var note = document.getElementById("filings-status");
+        note.appendChild(el("p", "hint", "Could not reload the digest just now (" + error.message + "). The data above is what was loaded earlier."));
+        return;
+      }
       var status = document.getElementById("status");
-      status.textContent = "Could not load the digest (" + error.message + "). Pull to retry.";
+      status.textContent = "Could not load the digest (" + error.message + "). Reload to retry.";
     });
 }
 
 // ------------------------------------------------------------------ digest rendering
 
 function renderStatus() {
+  // Prices only. Filings have their own status block (renderFilingsStatus); a live price refresh says nothing
+  // about whether filings are fresh.
   var status = document.getElementById("status");
   status.className = "status";
+  var meta = state.digest.meta;
   if (state.liveRows) {
     status.classList.add("live");
     var partial = false;
@@ -120,18 +174,140 @@ function renderStatus() {
         partial = true;
       }
     }
-    var text = "LIVE prices, fetched " + formatTime(state.liveFetchedUtc) + ". Filings are still the snapshot from " +
-      formatTime(state.digest.as_of_utc) + ".";
+    var text = "PRICES: LIVE, fetched " + formatTime(state.liveFetchedUtc) + " (Yahoo). This does not refresh filings; see the Filings section.";
     if (partial) {
       text = text + " Today's session may be in progress, so volume ratios can read low.";
     }
     status.textContent = text;
   } else {
-    var meta = state.digest.meta;
-    status.textContent = "Snapshot, not live. Filings as of " + formatTime(state.digest.as_of_utc) +
-      " (NSE). Prices to the " + meta.prices.last_bar + " close (Yahoo). Tap Refresh for live prices.";
+    status.textContent = "PRICES: Snapshot, not live. To the " + meta.prices.last_bar + " close (Yahoo). Tap Refresh prices for live prices.";
     status.title = state.digest.label;
   }
+}
+
+var FSTATE_LABEL = {
+  live: "live, filings found",
+  valid_empty: "live check: no filings in 7 days",
+  ambiguous_empty: "live check: empty, cannot be verified",
+  stale_live: "refresh failed, older live data kept",
+  failed_snapshot: "refresh failed, snapshot shown",
+  snapshot: "snapshot only"
+};
+
+function renderFilingsStatus() {
+  var box = document.getElementById("filings-status");
+  clear(box);
+  var fs = state.digest.filings_status;
+  if (!fs) {
+    box.textContent = "Filings status unavailable.";
+    return;
+  }
+  var head = el("div", "head");
+  var chipClass = "chip snapshot";
+  var chipText = "SNAPSHOT";
+  if (fs.mode === "live") { chipClass = "chip live"; chipText = "LIVE (NSE)"; }
+  if (fs.mode === "partial") { chipClass = "chip snapshot"; chipText = "PARTLY LIVE"; }
+  if (fs.mode === "refresh_failed") { chipClass = "chip failed"; chipText = "REFRESH FAILED"; }
+  head.appendChild(el("span", chipClass, chipText));
+  var when = "Saved copy fetched " + formatTime(fs.snapshot_fetched_utc);
+  if (fs.last_success_utc) {
+    when = "Last successful update " + formatTime(fs.last_success_utc);
+  }
+  head.appendChild(el("span", "when", when));
+  box.appendChild(head);
+
+  var run = fs.last_run;
+  if (fs.mode === "snapshot") {
+    box.appendChild(el("p", null, "These filings are a saved copy of NSE announcements (25 to 31 Oct), not live. Nothing has been refreshed since this server started."));
+  } else if (fs.mode === "live") {
+    box.appendChild(el("p", null, "All " + run.total + " symbols were fetched from NSE for the last 7 days."));
+  } else if (fs.mode === "partial") {
+    box.appendChild(el("p", null, run.ok + " of " + run.total + " symbols updated. " + run.failed + " failed (" + run.failed_symbols.join(", ") + "); those keep their older data, dated on each card."));
+  } else {
+    box.appendChild(el("p", null, "The last attempt (" + formatTime(fs.last_attempt_utc) + ") updated 0 of " + run.total + " symbols. Showing " +
+      (fs.last_success_utc ? "the data from the last successful update." : "the saved copy from " + formatTime(fs.snapshot_fetched_utc) + ".")));
+  }
+
+  if (fs.running && fs.progress) {
+    var bar = document.createElement("progress");
+    bar.max = fs.progress.total;
+    bar.value = fs.progress.done;
+    box.appendChild(bar);
+    box.appendChild(el("p", "hint", "Refreshing from NSE: " + fs.progress.done + " of " + fs.progress.total + " symbols · " + Math.round(fs.progress.elapsed_s) + " s. Each NSE call can take about 20 s from the free server."));
+  } else {
+    var button = el("button", "btn small ghost", fs.mode === "snapshot" ? "Refresh filings from NSE" : "Refresh filings again");
+    button.type = "button";
+    button.id = "filings-btn";
+    box.appendChild(button);
+    box.appendChild(el("span", "hint", " Filings only. Takes about 1 to 2 minutes."));
+  }
+
+  var details = el("details");
+  details.appendChild(el("summary", null, "Per-symbol status"));
+  var list = el("ul", "sym");
+  for (var i = 0; i < state.digest.portfolio.length; i++) {
+    var entry = state.digest.portfolio[i];
+    var st = fs.symbols[entry.symbol] || { state: "snapshot" };
+    var line = entry.symbol + ": " + (FSTATE_LABEL[st.state] || st.state);
+    if (st.fetched_utc) { line = line + " · " + formatTime(st.fetched_utc); }
+    if (st.detail && (st.state === "stale_live" || st.state === "failed_snapshot")) { line = line + " · " + st.detail; }
+    list.appendChild(el("li", null, line));
+  }
+  details.appendChild(list);
+  box.appendChild(details);
+}
+
+function maybeAutoRefreshFilings() {
+  // One automatic refresh per page load, only when there is no live update from the last 30 minutes.
+  if (state.autoRefreshed) { return; }
+  state.autoRefreshed = true;
+  var fs = state.digest.filings_status;
+  var fresh = fs && fs.last_success_utc && (Date.now() - new Date(fs.last_success_utc).getTime()) < 30 * 60 * 1000;
+  if (!fresh) { refreshFilings(); }
+}
+
+function refreshFilings() {
+  fetchJson("/api/filings/refresh", { method: "POST" }, 15000, 3)
+    .then(function () { return pollFilings(); })
+    .catch(function () {
+      var box = document.getElementById("filings-status");
+      box.appendChild(el("p", "hint", "Could not reach the server to start the refresh. The filings shown are unchanged and keep their dates."));
+    });
+}
+
+function pollFilings() {
+  if (state.filingsPolling) { return; }
+  state.filingsPolling = true;
+  var misses = 0;
+  function tick() {
+    fetchJson("/api/filings/status", {}, 10000, 1)
+      .then(function (result) {
+        misses = 0;
+        var status = result.body;
+        if (state.digest && state.digest.filings_status) {
+          state.digest.filings_status.running = status.running;
+          state.digest.filings_status.progress = status.progress;
+          renderFilingsStatus();
+        }
+        if (status.running) {
+          window.setTimeout(tick, 2000);
+        } else {
+          state.filingsPolling = false;
+          loadDigest();
+        }
+      })
+      .catch(function () {
+        misses = misses + 1;
+        if (misses >= 8) {
+          state.filingsPolling = false;
+          var box = document.getElementById("filings-status");
+          box.appendChild(el("p", "hint", "Lost contact with the server while refreshing. Reload to see the result."));
+          return;
+        }
+        window.setTimeout(tick, 2000);
+      });
+  }
+  tick();
 }
 
 function renderAlerts() {
@@ -190,6 +366,11 @@ function filingCard(filing, asAlert) {
   meta.appendChild(el("span", "chip", filing.symbol));
   meta.appendChild(el("span", "chip " + filing.tier, filing.tier));
   meta.appendChild(el("span", null, formatTime(filing.at)));
+  if (filing.source === "live") {
+    meta.appendChild(el("span", "chip live", "live · fetched " + formatTime(filing.fetched_utc)));
+  } else {
+    meta.appendChild(el("span", "chip snapshot", "snapshot"));
+  }
   if (filing.dup_count > 1) {
     meta.appendChild(el("span", null, "×" + filing.dup_count + " filed"));
   }
@@ -205,7 +386,91 @@ function filingCard(filing, asAlert) {
     link.rel = "noopener noreferrer";
     card.appendChild(link);
   }
+  var go = el("button", "btn small", "Research this change");
+  go.type = "button";
+  go.setAttribute("data-research", filing.symbol);
+  go.addEventListener("click", function () { researchChange(filing); });
+  card.appendChild(go);
   return card;
+}
+
+// ------------------------------------------------------------------ research this change
+
+function researchChange(filing) {
+  state.focusFiling = filing;
+  closeSheet();
+  showTab("research");
+  document.getElementById("ticker-input").value = filing.symbol;
+  renderFilingContext();
+  var ctx = document.getElementById("filing-context");
+  if (ctx.scrollIntoView) { ctx.scrollIntoView({ block: "start" }); }
+}
+
+function renderFilingContext() {
+  var box = document.getElementById("filing-context");
+  clear(box);
+  var filing = state.focusFiling;
+  if (!filing) { return; }
+  var card = el("div", "fctx");
+  card.appendChild(el("h3", null, "Researching this change: " + filing.symbol));
+  var meta = el("div", "meta");
+  meta.appendChild(el("span", "chip " + filing.tier, filing.tier));
+  meta.appendChild(el("span", null, "Filed " + formatTime(filing.at)));
+  meta.appendChild(el("span", filing.source === "live" ? "chip live" : "chip snapshot",
+    filing.source === "live" ? "live · fetched " + formatTime(filing.fetched_utc) : "snapshot"));
+  card.appendChild(meta);
+  card.appendChild(el("p", "title", filing.desc));
+  card.appendChild(el("p", "body", filing.text));
+  card.appendChild(el("p", "hint", "Why this tier: " + filing.tier_reason));
+  if (filing.url) {
+    var link = el("a", "link", "Open the filing on NSE ↗");
+    link.href = filing.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    card.appendChild(link);
+  }
+  card.appendChild(el("p", "hint", "The brief below is built from the company's latest annual report and latest earnings-call transcript. This filing is shown for context: FINN does not read its PDF, and the brief cannot reflect it unless the filing is one of those two documents."));
+  var actions = el("div", "row-actions");
+  var run = el("button", "btn small", "Analyse " + filing.symbol);
+  run.type = "button";
+  run.id = "ctx-analyse";
+  run.addEventListener("click", function (event) { startAnalysis(event); });
+  actions.appendChild(run);
+  var clearButton = el("button", "btn small ghost", "Clear");
+  clearButton.type = "button";
+  clearButton.addEventListener("click", function () { state.focusFiling = null; renderFilingContext(); });
+  actions.appendChild(clearButton);
+  card.appendChild(actions);
+  box.appendChild(card);
+}
+
+function docDate(doc) {
+  if (!doc || doc.status !== "ok") { return null; }
+  var text = (doc.date_in_text || "").replace(/(\d+)(st|nd|rd|th)/, "$1").replace(",", "");
+  var parsed = Date.parse(text);
+  if (!isNaN(parsed)) { return new Date(parsed); }
+  parsed = Date.parse("1 " + (doc.date_label || ""));
+  return isNaN(parsed) ? null : new Date(parsed);
+}
+
+function filingVsBriefNote(brief) {
+  var filing = state.focusFiling;
+  if (!filing || !brief || !brief.documents) { return null; }
+  if ((brief.ticker || (brief.company || {}).nse_symbol) !== filing.symbol) { return null; }
+  var filed = new Date(filing.at);
+  var newest = null;
+  var docs = [brief.documents.concall, brief.documents.annual_report];
+  for (var i = 0; i < docs.length; i++) {
+    var date = docDate(docs[i]);
+    if (date && (newest === null || date > newest)) { newest = date; }
+  }
+  if (newest === null) {
+    return "The filing is dated " + formatTime(filing.at) + ". The dates of the documents in this brief could not be read, so FINN cannot say which is newer.";
+  }
+  if (filed > newest) {
+    return "This filing (" + formatTime(filing.at) + ") is newer than the newest document in the brief (about " + newest.toLocaleDateString("en-IN", { month: "short", year: "numeric" }) + "), so the brief does not cover it.";
+  }
+  return "This filing (" + formatTime(filing.at) + ") is not newer than the documents in the brief, so the brief may discuss it. Open the filing and check.";
 }
 
 function renderFilings() {
@@ -281,6 +546,7 @@ function renderPortfolio() {
 
 function renderAll() {
   renderStatus();
+  renderFilingsStatus();
   renderAlerts();
   renderFilings();
   renderPortfolio();
@@ -326,7 +592,16 @@ function openSheet(symbol) {
     content.appendChild(el("p", "note", "No primary-source documents are loaded for " + entry.symbol + ". The research demo covers KPITTECH only."));
   }
 
-  content.appendChild(el("h2", "section", "Filings in snapshot (7 days)"));
+  content.appendChild(el("h2", "section", "Filings (7 days)"));
+  var fstat = state.digest.filings_status && state.digest.filings_status.symbols[symbol];
+  if (fstat) {
+    var statusLine = "Source status: " + (FSTATE_LABEL[fstat.state] || fstat.state);
+    if (fstat.fetched_utc) { statusLine = statusLine + " · fetched " + formatTime(fstat.fetched_utc); }
+    if (fstat.detail && (fstat.state === "stale_live" || fstat.state === "failed_snapshot")) {
+      statusLine = statusLine + " · live refresh failed (" + fstat.detail + ")";
+    }
+    content.appendChild(el("p", "hint", statusLine));
+  }
   var stack = el("div", "stack");
   var found = 0;
   for (var j = 0; j < state.digest.filings.length; j++) {
@@ -336,7 +611,7 @@ function openSheet(symbol) {
     }
   }
   if (found === 0) {
-    var note = entry.no_filings_note || "No filings in the snapshot window.";
+    var note = entry.no_filings_note || "No filings in the window. This symbol has not been refreshed live.";
     stack.appendChild(el("div", "empty", note));
   }
   content.appendChild(stack);
@@ -396,6 +671,9 @@ function showTab(name) {
   window.scrollTo(0, 0);
   if (name === "research" && state.questions.length === 0) {
     loadQuestions();
+  }
+  if (name === "research" && !state.guidanceLoaded) {
+    loadGuidance();
   }
 }
 
@@ -609,6 +887,109 @@ function runResearch() {
 }
 
 
+// ------------------------------------------------------------------ guidance vs outcome
+
+function loadGuidance() {
+  state.guidanceLoaded = true;
+  fetchJson("/api/guidance", {}, 15000, 3)
+    .then(function (result) {
+      var box = document.getElementById("guidance");
+      clear(box);
+      if (!result.ok || !result.body.examples || result.body.examples.length === 0) {
+        box.appendChild(el("div", "empty", "No guidance comparison is loaded."));
+        return;
+      }
+      for (var i = 0; i < result.body.examples.length; i++) {
+        box.appendChild(guidanceNode(result.body.examples[i]));
+      }
+      box.appendChild(el("p", "note", "Checked: " + result.body.verified_by));
+      box.appendChild(el("p", "note", "Not checked: " + result.body.not_verified));
+    })
+    .catch(function () {
+      state.guidanceLoaded = false;
+      var box = document.getElementById("guidance");
+      clear(box);
+      box.appendChild(el("div", "error", "Could not load the guidance comparison."));
+    });
+}
+
+function fieldLines(side) {
+  var list = el("ul", "gfields");
+  var names = ["metric", "period", "unit", "scope"];
+  for (var i = 0; i < names.length; i++) {
+    var item = el("li");
+    item.appendChild(el("b", null, names[i] + ": "));
+    var label = side[names[i]].label;
+    if (names[i] === "metric" && side.metric.basis === "inferred") { label = label + " (inferred)"; }
+    item.appendChild(document.createTextNode(label));
+    list.appendChild(item);
+  }
+  return list;
+}
+
+function sideNode(heading, side) {
+  var block = el("div", "gblock");
+  block.appendChild(el("h3", null, heading));
+  block.appendChild(el("blockquote", null, "\u201c" + side.quote + "\u201d"));
+  block.appendChild(el("p", "hint", side.title + " · PDF page " + side.pdf_page +
+    (side.quote_verbatim_in_stored_page ? " · ✓ quote verbatim in stored page" : " · ✗ quote NOT found in stored page")));
+  block.appendChild(fieldLines(side));
+  var row = el("div");
+  row.appendChild(safeLink(side.url, "Open source PDF"));
+  block.appendChild(row);
+  if (side.url_note) { block.appendChild(el("p", "hint", side.url_note)); }
+  if (side.page_text) {
+    var details = el("details");
+    details.appendChild(el("summary", null, "Show the page text"));
+    var holder = el("p", "body");
+    renderPassageWithQuote(holder, side.page_text, side.quote);
+    details.appendChild(holder);
+    block.appendChild(details);
+  }
+  if (side.extra_quotes) {
+    for (var i = 0; i < side.extra_quotes.length; i++) {
+      var extra = side.extra_quotes[i];
+      block.appendChild(el("p", "hint", "Also, PDF page " + extra.pdf_page + (extra.verbatim ? " (✓ verbatim)" : " (✗ not found)") + ": \u201c" + extra.quote + "\u201d"));
+    }
+  }
+  return block;
+}
+
+function guidanceNode(example) {
+  var wrap = el("div", "stack");
+  var head = el("div", "meta");
+  head.appendChild(el("span", "chip", example.symbol));
+  head.appendChild(el("span", null, example.title));
+  wrap.appendChild(head);
+  wrap.appendChild(sideNode("What management guided (" + example.guidance.call_date + ")", example.guidance));
+  wrap.appendChild(sideNode("What was reported (" + example.outcome.call_date + ")", example.outcome));
+  var gate = example.gate;
+  var verdict = el("div", gate.verdict === "comparable" ? "gverdict ok" : "gverdict");
+  if (gate.verdict === "comparable") {
+    verdict.appendChild(el("b", null, "Comparable: metric, period, unit and scope match"));
+    if (gate.position) {
+      verdict.appendChild(el("span", null, "Reported " + example.reported_value + " is " + gate.position + " the guided range " + example.guided_range.low + " to " + example.guided_range.high + "."));
+    }
+  } else {
+    verdict.appendChild(el("b", null, "Not directly comparable"));
+    verdict.appendChild(el("span", null, "FINN draws no conclusion from these two numbers because:"));
+    var list = el("ul");
+    for (var i = 0; i < gate.reasons.length; i++) {
+      var reason = gate.reasons[i];
+      list.appendChild(el("li", null, reason.field + ": " + reason.why + (reason.guidance && reason.outcome && reason.guidance !== reason.outcome ? " (guided: " + reason.guidance + "; reported: " + reason.outcome + ")" : "")));
+    }
+    verdict.appendChild(list);
+  }
+  for (var c = 0; c < (gate.caveats || []).length; c++) {
+    verdict.appendChild(el("span", null, "Note: " + gate.caveats[c]));
+  }
+  wrap.appendChild(verdict);
+  if (example.management_framing) {
+    wrap.appendChild(el("p", "note", example.management_framing));
+  }
+  return wrap;
+}
+
 // ------------------------------------------------------------------ generic research (any ticker)
 
 var analyze = { timer: null, jobId: null, startedAt: 0 };
@@ -652,7 +1033,15 @@ function showProgress(job) {
   var box = document.getElementById("analyze-progress");
   clear(box);
   var elapsed = Math.round((Date.now() - analyze.startedAt) / 1000);
-  box.appendChild(el("p", "note", "Analysing " + job.symbol + " · " + elapsed + " s elapsed. You can leave this tab open; nothing is sent twice."));
+  box.appendChild(el("p", "note", "Analysing " + job.symbol + " · " + elapsed + " s elapsed (the server stops at 270 s). You can leave this tab open; nothing is sent twice."));
+  var bar = document.createElement("progress");
+  bar.max = 270;
+  bar.value = Math.min(elapsed, 270);
+  bar.style.width = "100%";
+  box.appendChild(bar);
+  if (elapsed > 50) {
+    box.appendChild(el("p", "hint", "Waiting is normal here: the model call is paced to the provider's per-minute limit (up to about 60 s per section on the free plan)."));
+  }
   box.appendChild(stageList(job.stages || []));
 }
 
@@ -688,34 +1077,64 @@ function startAnalysis(event) {
     showAnalyzeError(describeError("invalid_ticker"));
     return;
   }
-  clear(document.getElementById("brief"));
+  // Keep the previous result on screen (dated) until the new one arrives; it is replaced on success and
+  // kept, with a note, if this attempt fails.
+  state.pendingTicker = ticker.toUpperCase();
   setAnalyzeBusy(true);
   analyze.startedAt = Date.now();
-  fetch("/api/analyze", {
+  // Submitting the same ticker twice is safe on the server (it returns the running job), so a stuck
+  // connection is abandoned after 15 s and retried instead of waiting out a 60 to 120 s connect timeout.
+  fetchJson("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ticker: ticker })
-  })
-    .then(function (response) {
-      return response.json().then(function (body) {
-        return { ok: response.ok, status: response.status, body: body };
-      });
-    })
+  }, 15000, 4)
     .then(function (result) {
       if (!result.ok) {
         var detail = result.body.detail || {};
         var code = detail.code || ("HTTP " + result.status);
         if (result.status === 422 && !detail.code) { code = "invalid_ticker"; }
-        showAnalyzeError(describeError(code, detail.message));
-        setAnalyzeBusy(false);
+        analysisFailed(describeError(code, detail.message));
         return;
       }
       handleJob(result.body);
     })
     .catch(function () {
-      showAnalyzeError("Network error. Try again.");
-      setAnalyzeBusy(false);
+      analysisFailed("Could not reach the server after 4 tries.");
     });
+}
+
+function storedBriefKey(symbol) {
+  return "finn.brief." + symbol;
+}
+
+function saveBrief(brief) {
+  var symbol = brief && (brief.ticker || (brief.company || {}).nse_symbol);
+  if (!symbol || brief.answer_source === "snapshot_fallback") { return; }
+  var text = JSON.stringify({ saved_at: new Date().toISOString(), brief: brief });
+  if (text.length < 1500000) { storeSet(storedBriefKey(symbol), text); }
+}
+
+function analysisFailed(message) {
+  setAnalyzeBusy(false);
+  var box = document.getElementById("analyze-progress");
+  clear(box);
+  box.appendChild(el("div", "error", message));
+  var symbol = state.pendingTicker;
+  var raw = symbol ? storeGet(storedBriefKey(symbol)) : null;
+  if (!raw) { return; }
+  var saved = null;
+  try { saved = JSON.parse(raw); } catch (e) { saved = null; }
+  if (!saved || !saved.brief) { return; }
+  var holder = document.getElementById("brief");
+  clear(holder);
+  var note = el("div", "banner op stale-note");
+  note.appendChild(el("b", null, "SAVED ON THIS DEVICE, " + formatTime(saved.saved_at)));
+  note.appendChild(el("span", null, "This is your last result for " + symbol + ". The new analysis did not finish, so nothing here is newer than that time."));
+  holder.appendChild(note);
+  var inner = el("div");
+  holder.appendChild(inner);
+  renderBrief(saved.brief, null, inner);
 }
 
 function handleJob(job) {
@@ -731,35 +1150,35 @@ function handleJob(job) {
   clear(box);
   if (job.status === "failed") {
     var error = job.error || {};
-    showAnalyzeError(describeError(error.code, error.message));
+    analysisFailed(describeError(error.code, error.message));
     if (job.stages && job.stages.length) { document.getElementById("analyze-progress").appendChild(stageList(job.stages)); }
     return;
   }
+  saveBrief(job.brief);
   renderBrief(job.brief, job);
 }
 
+var pollMisses = 0;
+
 function pollJob() {
   if (Date.now() - analyze.startedAt > 8 * 60 * 1000) {
-    showAnalyzeError("Still running after 8 minutes; stopped waiting. Reload and try again.");
-    setAnalyzeBusy(false);
+    analysisFailed("Still running after 8 minutes; stopped waiting. Reload and try again.");
     return;
   }
-  fetch("/api/analyze/" + analyze.jobId)
-    .then(function (response) {
-      return response.json().then(function (body) {
-        return { ok: response.ok, body: body };
-      });
-    })
+  fetchJson("/api/analyze/" + analyze.jobId, {}, 10000, 2)
     .then(function (result) {
+      pollMisses = 0;
       if (!result.ok) {
-        showAnalyzeError("The job was lost (the free server may have restarted). Try again.");
-        setAnalyzeBusy(false);
+        analysisFailed("The job was lost (the free server may have restarted). Try again.");
         return;
       }
       handleJob(result.body);
     })
     .catch(function () {
-      analyze.timer = window.setTimeout(pollJob, 5000);
+      pollMisses = pollMisses + 1;
+      var box = document.getElementById("analyze-progress");
+      box.appendChild(el("p", "hint", "No answer from the server (" + pollMisses + "). Still trying; the analysis keeps running there."));
+      analyze.timer = window.setTimeout(pollJob, 3000);
     });
 }
 
@@ -836,6 +1255,9 @@ function citeNode(citation, passages) {
   var linkRow = el("div");
   linkRow.appendChild(safeLink(citation.url, "Open source document"));
   box.appendChild(linkRow);
+  if (citation.context) {
+    box.appendChild(el("div", "hint", "Said just before: \u201c" + citation.context + "\u201d"));
+  }
   var quote = el("blockquote");
   var found = null;
   for (var i = 0; i < (passages || []).length; i++) {
@@ -917,9 +1339,16 @@ function sectionNode(title, section) {
   return box;
 }
 
-function renderBrief(brief, job) {
-  var box = document.getElementById("brief");
+function renderBrief(brief, job, target) {
+  var box = target || document.getElementById("brief");
   clear(box);
+  var ctxNote = filingVsBriefNote(brief);
+  if (ctxNote) {
+    var ctxBanner = el("div", "banner op");
+    ctxBanner.appendChild(el("b", null, "About the filing you came from"));
+    ctxBanner.appendChild(el("span", null, ctxNote));
+    box.appendChild(ctxBanner);
+  }
   if (brief.answer_source === "snapshot_fallback") {
     var banner = el("div", "banner op");
     banner.appendChild(el("b", null, "SAVED SNAPSHOT, not a fresh analysis"));
@@ -1030,6 +1459,11 @@ function wire() {
   });
 
   document.getElementById("refresh-btn").addEventListener("click", refreshPrices);
+  document.getElementById("filings-status").addEventListener("click", function (event) {
+    if (event.target.id === "filings-btn") {
+      refreshFilings();
+    }
+  });
 
   document.getElementById("portfolio").addEventListener("click", function (event) {
     var target = event.target.closest("button.stock");

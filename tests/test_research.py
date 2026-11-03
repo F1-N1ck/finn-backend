@@ -1678,3 +1678,129 @@ def test_call_model_asks_the_pacer_for_output_budget_and_records_completion_toke
         return {"text": '{"claims": []}', "usage": {"total_tokens": 900, "completion_tokens": 450}, "latency_s": 0.1}
     pipeline.call_model(Cfg(), [{"role": "user", "content": "x"}], 600, spy, chat)
     assert seen["wait"]["estimated_output"] == 600 and spy.events[0][1:] == (900, 450)
+
+
+# ------------------------------------------------------------------ claims must keep their context (round 9)
+
+def _passage(key):
+    path = os.path.join(os.path.dirname(__file__), "fixtures", "outlook_passages_2026_11_03.json")
+    with open(path) as handle:
+        data = json.load(handle)[key]
+    return [{"source_id": "S1", "text": data["text"], "page": data["page"], "speaker": data["speaker"]}]
+
+
+def _check(key, text, quote, context=""):
+    claim = {"text": text, "source": "S1", "quote": quote}
+    if context:
+        claim["context"] = context
+    return sections.check_text_claims({"claims": [claim]}, _passage(key))[0]
+
+
+TATA_HOPE = "I'm hoping that even in the healthcare business H2 will be better than H1."
+
+
+def test_hope_cannot_be_upgraded_to_expects():
+    bad = _check("TATAELXSI:S1", "Management expects the healthcare business to perform better in H2 than in H1.", TATA_HOPE)
+    assert bad["auto_pass"] is False and "hedge or condition: hope" in bad["context_dropped"]
+    good = _check("TATAELXSI:S1", "Management hopes the healthcare business will do better in H2 than in H1.", TATA_HOPE)
+    assert good["auto_pass"] is True, good["context_dropped"]
+
+
+def test_an_exception_in_the_same_sentence_must_be_kept():
+    quote = "I hope that in all other businesses H2 will be better than H1 for us."
+    bad = _check("TATAELXSI:S1", "Management hopes all other businesses will do better in H2 than in H1.", quote)
+    assert bad["auto_pass"] is False
+    assert any("exception" in item or "place: europe" in item for item in bad["context_dropped"])
+    good = _check("TATAELXSI:S1", "Apart from the slowness in Europe in automotive, management hopes all other businesses "
+                  "will do better in H2 than in H1.", "Overall, I would say yes, the only worry still seems to be the slowness in Europe "
+                  "from the automotive perspective, but other than that, I hope that in all other businesses H2 will be better than H1 for us.")
+    assert good["auto_pass"] is True, good["context_dropped"]
+
+
+ASTRAL_GUIDANCE = "Then after the situation will improve, we are definitely going to change the guidance."
+
+
+def test_a_condition_cannot_be_replaced_by_a_date_the_speaker_did_not_attach_to_it():
+    bad = _check("ASTRAL:S4", "Management states they are definitely going to change the guidance after September.", ASTRAL_GUIDANCE)
+    assert bad["auto_pass"] is False
+    assert "sep" in bad["periods_not_in_quote"] and any("condition not kept" in item for item in bad["context_dropped"])
+    good = _check("ASTRAL:S4", "Management says it will definitely change the guidance after the situation improves.", ASTRAL_GUIDANCE)
+    assert good["auto_pass"] is True, (good["context_dropped"], good["periods_not_in_quote"])
+
+
+def test_value_growth_keeps_its_condition_and_the_volume_value_distinction():
+    quote = "and if that is the case, our value growth for the full year will be more than 20%, in top line."
+    bad = _check("ASTRAL:S2", "Management projects that value growth for the full year will be more than 20%.", quote)
+    assert bad["auto_pass"] is False
+    assert "measure: volume" in bad["context_dropped"] and any("condition" in item for item in bad["context_dropped"])
+    good = _check("ASTRAL:S2", "In the pipe industry, if the value gap over volume continues, management projects top-line "
+                  "value growth for the full year of more than 20%.", quote)
+    assert good["auto_pass"] is True, good["context_dropped"]
+
+
+def test_a_business_named_just_before_the_quote_must_appear_in_the_claim():
+    quote = "so we will be definitely going to achieve on a full year basis."
+    bad = _check("ASTRAL:S2", "Management says it will definitely achieve double-digit volume growth on a full-year basis.", quote)
+    assert bad["auto_pass"] is False and any("pipe" in item for item in bad["context_dropped"])
+    good = _check("ASTRAL:S2", "For the pipe business, management says it will definitely achieve double-digit volume growth "
+                  "on a full-year basis.", quote)
+    assert good["auto_pass"] is True, good["context_dropped"]
+
+
+def test_context_must_be_the_exact_words_just_before_the_quote():
+    quote = "so we will be definitely going to achieve on a full year basis."
+    real = "demand scenario in pipe industry is very robust from july onwards."
+    # not directly before the quote (other sentences sit between them)
+    far = _check("ASTRAL:S2", "For the pipe business, management is definitely going to achieve it.", quote, context=real)
+    assert far["context_problem"] == "context_not_verbatim" and far["auto_pass"] is False
+    invented = _check("ASTRAL:S2", "For the pipe business, management is definitely going to achieve it.", quote,
+                      context="Our plumbing division is booming.")
+    assert invented["context_problem"] == "context_not_verbatim"
+
+
+def test_the_verb_may_is_not_a_month_but_May_is():
+    assert sections.period_tokens("margins may improve") == set()
+    assert sections.period_tokens("by May and in September") == {"may", "sep"}
+
+
+def test_retrieval_starts_a_little_before_the_best_window_at_a_sentence_start_and_never_before_the_turn():
+    from finn import retrieval
+    filler = "We discussed the plumbing business in some detail today. " * 12
+    turn_text = filler + "Our guidance for the year is double digit growth. " + "Other remarks follow here. " * 60
+    pages = [{"page": 1, "text": "Moderator: Welcome.\nAnalyst One: Question?\nAnalyst Two: Another?\nManagement Person: " + turn_text
+              + "\nAnalyst One: More?\nAnalyst Two: Fine?\nModerator: Thanks."}]
+    passages = retrieval.retrieve_turns(pages, retrieval.GUIDANCE_TERMS, top_k=1, window=300, step=100, lead=200)
+    if passages:
+        text = passages[0]["text"]
+        assert text.startswith(("We", "Our", "Other", "Management")) and len(text) <= 300 + 200 + 5
+
+
+def test_a_reply_that_stopped_at_the_token_limit_is_not_used():
+    from finn import llm_adapter
+
+    def chat(config, messages):
+        return {"text": '{"claims": []}', "usage": {"total_tokens": 100, "completion_tokens": 100}, "latency_s": 0.1,
+                "finish_reason": "length"}
+    with pytest.raises(llm_adapter.LLMBadResponse):
+        pipeline.call_model(Cfg(), [{"role": "user", "content": "x"}], 100, pacer.TokenPacer(10 ** 9, 0), chat)
+
+
+def test_a_claim_may_not_add_volume_or_a_place_the_speaker_did_not_say():
+    quote = "so we will be definitely going to achieve on a full year basis."
+    added = _check("ASTRAL:S2", "For the pipe business, management says it will definitely achieve double-digit volume growth "
+                   "on a full-year basis in India.", quote)
+    # 'volume' is not said before, in or right after this sentence of the saved window only if it is absent from it
+    assert added["auto_pass"] is False and "added place: india" in added["context_dropped"]
+    plain = _check("ASTRAL:S2", "For the pipe business, management says it will definitely achieve double-digit growth on a "
+                   "full-year basis.", quote)
+    assert plain["auto_pass"] is True, plain["context_dropped"]
+
+
+def test_run_script_uses_a_short_connect_timeout_and_probes_addresses():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("run_tests2", os.path.join(os.path.dirname(__file__), "..", "scripts", "run_research_tests.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.TIMEOUT_POLL[0] == module.CONNECT_TIMEOUT_S == 10
+    found = module.probe_addresses("http://127.0.0.1:9", per_address_s=1.0)   # nothing listens on port 9
+    assert found and found[0]["address"] == "127.0.0.1" and ("error" in found[0] or "connect_s" in found[0])

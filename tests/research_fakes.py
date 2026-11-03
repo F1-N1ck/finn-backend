@@ -90,8 +90,13 @@ def make_fake_chat(mode="good", calls=None):
                     "scope": "consolidated" if "consolidated" in text.lower() else "not stated",
                     "source": first_id, "quote": quote}]}
         else:
-            snippet = " ".join(text.split())[40:200]
-            snippet = snippet[snippet.find(" ") + 1:snippet.rfind(" ")]
+            flat = " ".join(text.split())
+            sentences = [x for x in re.split(r"(?<=[.?!])\s+(?=[A-Z0-9])", flat) if 40 <= len(x) <= 260]
+            if sentences:
+                snippet = sentences[0]  # a whole sentence, so nothing its own sentence says is left out of the claim
+            else:
+                snippet = flat[40:200]
+                snippet = snippet[snippet.find(" ") + 1:snippet.rfind(" ")]
             if mode == "hallucinate":
                 snippet = "management guided for 40% revenue growth next year"
             out = {"not_stated": False,

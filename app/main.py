@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
-from finn import budget, digest, grounded_qa, hostcheck, llm_adapter, prices, snapshot
+from finn import announcements, budget, digest, grounded_qa, guidance, hostcheck, llm_adapter, prices, snapshot
 from finn.research import jobs as research_jobs
 from finn.research import timing as research_timing
 from finn.research import validate as research_validate
@@ -123,12 +123,34 @@ def root():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"), headers={"Cache-Control": "no-cache"})
 
 
+FILINGS = announcements.FilingsRefresher()
+
+
 @app.get("/api/digest")
 def get_digest():
-    result = digest.build_digest(questions=grounded_qa.QUESTIONS)
+    result = digest.build_digest(questions=grounded_qa.QUESTIONS, live_state=FILINGS.live_state(),
+                                 running_status=FILINGS.status())
     if result is None:
         raise HTTPException(status_code=503, detail={"code": "digest_snapshot_missing"})
-    return result
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/filings/refresh", status_code=202)
+def refresh_filings():
+    """Start a background NSE announcements refresh for the demo portfolio (not prices). Poll /api/filings/status."""
+    started, reason = FILINGS.start()
+    return JSONResponse(dict(FILINGS.status(), started=started, reason=reason), status_code=202,
+                        headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/filings/status")
+def filings_status():
+    return JSONResponse(FILINGS.status(), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/guidance")
+def get_guidance():
+    return JSONResponse(guidance.evaluate_all(), headers={"Cache-Control": "no-store"})
 
 
 LAST_PRICE_REFRESH = {"at": 0.0}

@@ -51,6 +51,7 @@
         <div class="row">
           <button type="button" id="refresh-btn" class="btn secondary">Refresh prices (live)</button>
           <span id="refresh-note" class="hint"></span>
+          <span class="hint">Prices only. Filings have their own refresh below.</span>
         </div>
       </div>
 
@@ -58,6 +59,7 @@
       <div id="alerts" class="stack"></div>
 
       <h2 class="section">Filings <span id="filing-count" class="count"></span></h2>
+      <div id="filings-status" class="card fstatus" role="status" aria-live="polite">Loading filings status…</div>
       <div id="filings" class="stack"></div>
 
       <h2 class="section">Portfolio <span class="count">16 stocks</span></h2>
@@ -69,7 +71,8 @@
     <section id="tab-research" class="tab" role="tabpanel" aria-labelledby="btn-research" hidden>
       <div class="card">
         <h2 class="section flush">Analyse any NSE company</h2>
-        <p class="hint">Finds the latest annual report and earnings-call transcript, reads them, and writes a short cited brief. Takes 1 to 3 minutes on the free server.</p>
+        <div id="filing-context"></div>
+        <p class="hint">Finds the latest annual report and earnings-call transcript, reads them, and writes a short cited brief. Usually 1.5 to 4 minutes on the free server (the model call is rate-paced).</p>
         <form id="analyze-form" class="ticker-row" autocomplete="off">
           <input id="ticker-input" type="text" maxlength="20" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="NSE ticker, e.g. PIDILITIND" aria-label="NSE ticker">
           <button type="submit" id="analyze-btn" class="btn">Analyse</button>
@@ -77,6 +80,9 @@
         <div id="analyze-progress" aria-live="polite"></div>
       </div>
       <div id="brief" aria-live="polite"></div>
+
+      <h2 class="section">Guidance vs outcome</h2>
+      <div id="guidance" class="stack"><div class="empty">Loading…</div></div>
 
       <h2 class="section">Saved KPIT demo</h2>
       <div class="card">

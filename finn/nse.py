@@ -31,10 +31,13 @@ def normalise_symbol(symbol):
     return cleaned
 
 
-def make_session():
+def make_session(warm=True):
+    """warm=False skips the page visit that sets cookies. From Render the visit timed out (30 s) and the API
+    answered without it (see RENDER_HOST_CHECK_RESULTS.md), so the live refresh uses warm=False."""
     session = requests.Session()
     session.headers.update(HEADERS)
-    session.get(PAGE_URL, timeout=30)  # sets the cookies the API expects
+    if warm:
+        session.get(PAGE_URL, timeout=30)  # sets the cookies the API expects
     return session
 
 
@@ -42,11 +45,11 @@ def _fmt(day):
     return day.strftime("%d-%m-%Y")
 
 
-def fetch(session, symbol, from_date, to_date):
+def fetch(session, symbol, from_date, to_date, timeout=30):
     """One API call. Returns {'status','kind','items','error'}; never raises on HTTP/parse problems."""
     params = {"index": "equities", "symbol": symbol, "from_date": _fmt(from_date), "to_date": _fmt(to_date)}
     try:
-        response = session.get(API_URL, params=params, timeout=30)
+        response = session.get(API_URL, params=params, timeout=timeout)
     except requests.exceptions.RequestException as error:
         return {"status": None, "kind": "fetch_error", "items": None, "error": type(error).__name__}
     if response.status_code != 200:
@@ -74,11 +77,11 @@ def newest_filing(items):
     return newest
 
 
-def classify_window(session, symbol, window_days=7, widen_days=90, today=None):
+def classify_window(session, symbol, window_days=7, widen_days=90, today=None, timeout=30):
     symbol = normalise_symbol(symbol)
     if today is None:
         today = datetime.now()
-    first = fetch(session, symbol, today - timedelta(days=window_days), today)
+    first = fetch(session, symbol, today - timedelta(days=window_days), today, timeout)
     verdict = {"symbol": symbol, "window_days": window_days, "status": first["status"]}
     if first["kind"] != "list":
         verdict["verdict"] = first["kind"]
@@ -89,7 +92,7 @@ def classify_window(session, symbol, window_days=7, widen_days=90, today=None):
         verdict["verdict"] = "ok_nonempty"
         verdict["items"] = first["items"]
         return verdict
-    wide = fetch(session, symbol, today - timedelta(days=widen_days), today)
+    wide = fetch(session, symbol, today - timedelta(days=widen_days), today, timeout)
     if wide["kind"] != "list":
         verdict["verdict"] = wide["kind"]
         verdict["detail"] = "while widening window: " + str(wide["error"])

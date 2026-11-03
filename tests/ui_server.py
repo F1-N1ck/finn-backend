@@ -82,7 +82,46 @@ def install_fake_research():
                                          limiter=jobs.SlidingLimit(1000, 1000))
 
 
+def install_fake_filings():
+    """Fake NSE: slow enough to show progress. ITC has a new HIGH filing, TCS is a valid empty window, ICICIBANK is
+    unverifiable-empty, SBIN fails. TCS/ITC/ICICIBANK/SBIN cover every state the UI must tell apart."""
+    import time
+    from datetime import datetime, timedelta, timezone
+    from finn import announcements
+    ist = timezone(timedelta(hours=5, minutes=30))
+    stamp = (datetime.now(ist) - timedelta(hours=1)).strftime("%d-%b-%Y %H:%M:%S")
+
+    def fake_fetch(symbol):
+        time.sleep(0.4)
+        if symbol == "SBIN":
+            return {"symbol": symbol, "verdict": "fetch_error", "detail": "ReadTimeout", "status": None}
+        if symbol == "TCS":
+            return {"symbol": symbol, "verdict": "valid_empty_window", "newest_filing_in_wide_window": "19-Oct-2026",
+                    "widened_count": 45}
+        if symbol == "ICICIBANK":
+            return {"symbol": symbol, "verdict": "ambiguous_empty", "detail": "empty even over 90 days"}
+        items = [{"an_dt": stamp, "desc": "Updates" if symbol != "ITC" else "Outcome of Board Meeting",
+                  "attchmntText": "FAKE live filing for " + symbol + " used by the UI test.",
+                  "attchmntFile": "https://nsearchives.nseindia.com/corporate/fake_" + symbol + ".pdf"}]
+        return {"symbol": symbol, "verdict": "ok_nonempty", "items": items}
+
+    os.makedirs("/tmp/finn_ui_cache", exist_ok=True)
+    state_file = "/tmp/finn_ui_cache/announcements_ui.json"
+    if os.path.exists(state_file):
+        os.remove(state_file)
+    main.FILINGS = announcements.FilingsRefresher(fetch_fn=fake_fetch, state_file=state_file, cooldown_s=0)
+
+
 install_fake_research()
+install_fake_filings()
+
+
+@main.app.post("/__test/reset")
+def reset_filings_for_test():
+    """UI-test server only (this file is never imported by the real app)."""
+    install_fake_filings()
+    return {"ok": True}
+
 
 if __name__ == "__main__":
     uvicorn.run(main.app, host="127.0.0.1", port=8765, log_level="warning")

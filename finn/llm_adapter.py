@@ -327,6 +327,7 @@ def _parse_success(config, response, elapsed, attempt):
     try:
         data = response.json()
         text = data["choices"][0]["message"]["content"]
+        finish_reason = data["choices"][0].get("finish_reason")
     except Exception:
         raise LLMBadResponse("Provider reply was not in the expected chat format", status=200)
     if text is None:
@@ -344,6 +345,7 @@ def _parse_success(config, response, elapsed, attempt):
                 + usage["completion_tokens"] * config.price_out_per_m) / 1000000.0
     return {
         "text": strip_think(text),
+        "finish_reason": finish_reason,
         "model_reported": data.get("model"),
         "usage": usage,
         "latency_s": round(elapsed, 2),

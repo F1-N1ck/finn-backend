@@ -61,10 +61,45 @@ def save(report, path):
     os.replace(tmp, path)
 
 
+# (connect, read) seconds. The connect part is short on purpose: in the saved runs the odd delays were exactly the
+# client's old timeout plus about 0.5 s (45.5 s with a 45 s timeout, 60.5 s with 60 s), which fits "the first address
+# never answered, the next one did". With a 10 s connect limit the same event should now cost about 10.5 s; if it
+# still costs 45.5 s or 60.5 s the explanation is wrong.
+CONNECT_TIMEOUT_S = 10
+TIMEOUT_POST = (CONNECT_TIMEOUT_S, 60)
+TIMEOUT_POLL = (CONNECT_TIMEOUT_S, 45)
+TIMEOUT_PING = (CONNECT_TIMEOUT_S, 60)
+
+
+def probe_addresses(base, per_address_s=5.0):
+    """Resolve the host and time a plain TCP connect to every address it has, so a dead address is visible."""
+    import socket
+    from urllib.parse import urlsplit
+    parts = urlsplit(base)
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    found = []
+    try:
+        infos = socket.getaddrinfo(parts.hostname, port, type=socket.SOCK_STREAM)
+    except OSError as error:
+        return [{"error": type(error).__name__}]
+    for family, kind, proto, _, sockaddr in infos:
+        entry = {"address": sockaddr[0], "family": "IPv6" if family == socket.AF_INET6 else "IPv4"}
+        started = time.time()
+        try:
+            connection = socket.create_connection(sockaddr[:2], timeout=per_address_s)
+            connection.close()
+            entry["connect_s"] = round(time.time() - started, 2)
+        except OSError as error:
+            entry["error"] = type(error).__name__
+            entry["after_s"] = round(time.time() - started, 2)
+        found.append(entry)
+    return found
+
+
 def post_analyze(base, body):
     started = time.time()
     try:
-        response = requests.post(base + "/api/analyze", json=body, timeout=60)
+        response = requests.post(base + "/api/analyze", json=body, timeout=TIMEOUT_POST)
     except requests.RequestException as error:
         return None, round(time.time() - started, 2), type(error).__name__
     return response, round(time.time() - started, 2), None
@@ -88,7 +123,7 @@ def add_server_timing(info, response, sent_at):
 def poll_once(base, job_id):
     started = time.time()
     try:
-        response = requests.get(base + "/api/analyze/" + job_id, timeout=45)
+        response = requests.get(base + "/api/analyze/" + job_id, timeout=TIMEOUT_POLL)
     except requests.RequestException as error:
         return {"t": time.time(), "network_error": type(error).__name__, "seconds": round(time.time() - started, 2)}, None
     info = describe_response(response)
@@ -126,7 +161,7 @@ def start_pinger(base, pings, stop, every_s=3.0):
             started = time.time()
             entry = {"sent_at": round(started, 3)}
             try:
-                response = requests.get(base + "/healthz", timeout=60)
+                response = requests.get(base + "/healthz", timeout=TIMEOUT_PING)
                 entry["http"] = response.status_code
                 entry["headers_s"] = round(response.elapsed.total_seconds(), 2)
             except requests.RequestException as error:
@@ -174,6 +209,8 @@ def run_one(base, ticker, max_wait_s, poll_s, report_hook):
     record["job_id"] = job["job_id"]
     record["first_instance"] = job.get("instance")
     record["pings"] = []
+    record["connect_timeout_s"] = CONNECT_TIMEOUT_S
+    record["addresses_at_start"] = probe_addresses(base)
     stop_pings = threading.Event()
     start_pinger(base, record["pings"], stop_pings)
     bad_streak = 0
@@ -203,6 +240,7 @@ def run_one(base, ticker, max_wait_s, poll_s, report_hook):
         if polled["status"] != "running":
             final = polled
     stop_pings.set()
+    record["addresses_at_end"] = probe_addresses(base)
     record["wall_s"] = round(time.time() - started, 1)
     record["active_wall_s"] = round(record["wall_s"] - record.get("client_paused_s", 0), 1)
     if final is None:

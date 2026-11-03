@@ -184,7 +184,21 @@ def _window_score(text, terms):
 ROLE_MULTIPLIER = {"management": 1.5, "analyst": 0.5, "moderator": 0.0, "host": 0.0}
 
 
-def retrieve_turns(pages, terms, top_k=4, window=1400, step=400):
+def _lead_start(text, best_start, lead):
+    """Begin up to `lead` characters before the best window, at a sentence start, so the sentences that say which
+    business or measure a statement is about are in the passage (and so can be checked) instead of cut off.
+    Never starts before the turn."""
+    begin = max(0, best_start - lead)
+    if begin == 0:
+        return 0
+    match = re.search(r"[.?!]\s+(?=[A-Z])", text[begin:best_start])
+    if match:
+        return begin + match.end()
+    space = text.find(" ", begin)
+    return begin if space == -1 or space >= best_start else space + 1
+
+
+def retrieve_turns(pages, terms, top_k=4, window=1400, step=400, lead=500):
     """Top-k windows from speaker turns. Returns passages with source IDs, page, speaker, role."""
     turns = split_turns(pages)
     candidates = []
@@ -207,13 +221,14 @@ def retrieve_turns(pages, terms, top_k=4, window=1400, step=400):
     passages = []
     for rank, item in enumerate(candidates[:top_k]):
         turn = turns[item[1]]
-        start = item[2]
-        raw = turn["text"][start:start + window]
-        lead = len(raw) - len(raw.lstrip())
+        best_start = item[2]
+        start = _lead_start(turn["text"], best_start, lead)
+        raw = turn["text"][start:best_start + window]
+        pad = len(raw) - len(raw.lstrip())
         shown = raw.strip()
-        marks = [(0, _page_at(turn, start + lead))]
+        marks = [(0, _page_at(turn, start + pad))]
         for mark_offset, mark_page in turn["page_marks"]:
-            relative = mark_offset - start - lead
+            relative = mark_offset - start - pad
             if 0 < relative < len(shown):
                 marks.append((relative, mark_page))
         passages.append({

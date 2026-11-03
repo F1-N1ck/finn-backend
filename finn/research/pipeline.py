@@ -330,11 +330,15 @@ def call_model(config, messages, max_tokens, pacer, chat_fn, max_wait_s=70.0):
         waited = waited + pause + 1.0
         raw = chat_fn(local, messages)
     usage = raw.get("usage") or {}
+    if raw.get("finish_reason") == "length":
+        # the reply stopped at max_tokens: a cut-off JSON could silently lose claims, so it is not used
+        raise llm_adapter.LLMBadResponse("The model reply was cut off at the output-token limit")
     pacer.record(usage.get("total_tokens") or estimated, output_tokens=usage.get("completion_tokens"))
     parsed = grounded_qa.parse_answer_json(raw["text"])
     if not isinstance(parsed, dict):
         raise ValueError("model reply was not a JSON object")
-    return parsed, {"latency_s": raw.get("latency_s"), "usage": usage, "paced_wait_s": round(waited, 1)}
+    return parsed, {"latency_s": raw.get("latency_s"), "usage": usage, "paced_wait_s": round(waited, 1),
+                    "finish_reason": raw.get("finish_reason")}
 
 
 _QUOTE_MAP = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"', "–": "-", "—": "-"})
@@ -391,10 +395,13 @@ def text_section(parsed, passages, docs, note=None):
                "checks": {"source_exists": check["source_exists"],
                           "quote_verbatim": check["quote_verbatim_in_source"],
                           "numbers_missing_from_source": check["numbers_missing_from_cited_source"],
-                          "periods_not_in_quote": check.get("periods_not_in_quote", [])},
+                          "periods_not_in_quote": check.get("periods_not_in_quote", []),
+                          "context_dropped": check.get("context_dropped", [])},
                "citation": None}
         if passage is not None:
             row["citation"] = _citation(docs[passage["doc"]], passage, str(claim.get("quote", "")))
+            if check.get("context"):
+                row["citation"]["context"] = check["context"]  # exact words just before the quote, shown with it
         if check["auto_pass"]:
             shown.append(row)
         else:
@@ -407,6 +414,10 @@ def text_section(parsed, passages, docs, note=None):
                 problems.append("number_not_in_source")
             if check.get("periods_not_in_quote"):
                 problems.append("period_not_in_quote: " + ", ".join(check["periods_not_in_quote"]))
+            if check.get("context_problem"):
+                problems.append(check["context_problem"])
+            for dropped in check.get("context_dropped", []):
+                problems.append("left_out: " + dropped)
             row["problems"] = problems
             rejected.append(row)
     section = {"claims": shown, "items": [], "failed_checks": rejected,
@@ -572,7 +583,7 @@ def analyze(symbol, config, callback=None, session=None, resolver=None, chat_fn=
             messages = sections.build_messages(prompt, passages,
                                                "Question: What explicit forward-looking statements did management make?")
             result_sections["outlook"] = run_section(
-                "model:outlook", config, messages, 600, pacer, chat_fn,
+                "model:outlook", config, messages, 800, pacer, chat_fn,
                 lambda p: text_section(p, passages, docs, note), tracker, lim["deadline_s"])
     else:
         result_sections["outlook"] = not_found("no earnings-call transcript could be retrieved ("
