@@ -10,7 +10,7 @@ import os
 import re
 import time
 
-from finn import grounded_qa, llm_adapter
+from finn import grounded_qa, llm_adapter, retrieval
 from finn.research import cache, discover, extract, pacer as pacer_module, safe_fetch, sections
 
 DISCOVERY_TTL_S = 6 * 3600
@@ -127,18 +127,31 @@ def mark_cached(brief):
 
 # ------------------------------------------------------------------ documents
 
+MONTH_NAMES = "January|February|March|April|May|June|July|August|September|October|November|December"
 CALL_DATE_RES = [
-    re.compile(r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+20\d\d\b"),
-    re.compile(r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December),?\s+20\d\d\b"),
+    re.compile(r"\b(" + MONTH_NAMES + r")\s+\d{1,2}(?:st|nd|rd|th)?,?\s+20\d\d\b"),
+    re.compile(r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:" + MONTH_NAMES + r"),?\s+20\d\d\b"),
 ]
+CALL_PAGE_MARKERS = ("moderator:", "management:", "speakers:", "page 1 of", "conference call", "earnings call")
+LETTER_MARKERS = ("dear sir", "dear madam", "sub:", "sub :", "subject:")
 
 
 def find_call_date(pages):
-    for page in pages[:2]:
+    """Date of the call itself, read from the transcript's own title page (the one that lists management or speakers).
+    The covering letter to the exchanges carries the filing date, which is usually days after the call, so a page
+    that looks like that letter is skipped. None when no such page is found: no date is better than a wrong one."""
+    for page in pages[:5]:
+        low = page["text"].lower()
+        is_letter = any(m in low for m in LETTER_MARKERS) and "moderator:" not in low
+        if is_letter or not any(m in low for m in CALL_PAGE_MARKERS):
+            continue
+        best = None
         for regex in CALL_DATE_RES:
             match = regex.search(page["text"])
-            if match:
-                return match.group(0)
+            if match and (best is None or match.start() < best.start()):
+                best = match
+        if best:
+            return best.group(0)
     return None
 
 
@@ -152,8 +165,8 @@ MONTH_NUMBERS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "ju
 
 
 def label_matches_text(label, text_date):
-    """True/False if the month and year in the Screener label agree with the date printed in the transcript;
-    None when either is missing or unreadable."""
+    """True if the call date printed in the transcript is within one month of Screener's label (labels follow the
+    filing month, calls sometimes fall just before it); False if further apart; None when either is unreadable."""
     if not label or not text_date:
         return None
     label_match = re.search(r"([A-Za-z]{3})[a-z]*\W+((?:19|20)\d\d)", label)
@@ -161,8 +174,25 @@ def label_matches_text(label, text_date):
     month_match = re.search(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)", text_date, re.I)
     if not (label_match and year_match and month_match):
         return None
-    return (MONTH_NUMBERS[label_match.group(1).lower()] == MONTH_NUMBERS[month_match.group(1).lower()[:3]]
-            and label_match.group(2) == year_match.group(1))
+    label_index = int(label_match.group(2)) * 12 + MONTH_NUMBERS[label_match.group(1).lower()]
+    text_index = int(year_match.group(1)) * 12 + MONTH_NUMBERS[month_match.group(1).lower()[:3]]
+    return abs(label_index - text_index) <= 1
+
+
+MIN_TRANSCRIPT_CHARS = 8000
+
+
+def looks_like_transcript(pages):
+    """A real call transcript is tens of thousands of characters with a moderator and many speaker turns. A one-page
+    notice that only links an audio recording is not one. Returns (True/False, facts)."""
+    text = " ".join(page["text"] for page in pages)
+    chars = len(text)
+    try:
+        turns = len(retrieval.split_turns(pages))
+    except Exception:
+        turns = 0
+    ok = chars >= MIN_TRANSCRIPT_CHARS and (turns >= 6 or "moderator" in text.lower())
+    return ok, {"chars": chars, "pages": len(pages), "turns": turns}
 
 
 def get_document(kind, candidates, company_name, session, resolver, tracker, lim):
@@ -188,6 +218,8 @@ def get_document(kind, candidates, company_name, session, resolver, tracker, lim
         doc_key = cache.key_for("doc|" + url)
         stage = tracker.start(kind + ":" + label)
         cached = cache.load("docs", doc_key)
+        if cached is not None and kind == "concall" and not looks_like_transcript(cached["pages"])[0]:
+            cached = None
         if cached is not None:
             record = cached["record"]
             record["fetch"]["source"] = "disk_cache"
@@ -226,6 +258,13 @@ def get_document(kind, candidates, company_name, session, resolver, tracker, lim
             tracker.finish(stage, "failed", "extraction: " + extracted["state"] + " after " + str(extracted["seconds"]) + " s")
             continue
         pages = extracted["pages"]
+        if kind == "concall":
+            is_transcript, facts = looks_like_transcript(pages)
+            if not is_transcript:
+                skipped.append({"label": label, "url": url, "state": "not_a_transcript", "detail": facts})
+                tracker.finish(stage, "failed", "not a transcript: " + str(facts["chars"]) + " characters, "
+                               + str(facts["pages"]) + " page(s), " + str(facts["turns"]) + " speaker turns")
+                continue
         record = {
             "kind": kind, "title": title.strip(" -"), "label": label, "url": url,
             "host": safe_fetch.host_of(url), "date_label": date_label,
@@ -559,6 +598,9 @@ def _missing_reason(kind, selection, skipped):
             return "none listed on a trusted host; " + listed_but_untrusted[0]
         return "none listed with a usable link"
     states = [str(s.get("state")) for s in skipped]
+    if "not_a_transcript" in states:
+        return ("the listed document is not a transcript (for example a one-page notice that links an audio "
+                "recording); no transcript text was available")
     return "listed but not retrievable: " + ", ".join(states)
 
 

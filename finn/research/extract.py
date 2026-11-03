@@ -34,6 +34,9 @@ def fix_ligatures(text):
     return text
 
 
+RUPEE_CANDIDATE_RE = re.compile(r"(?:^|[\s(])[H`](?=\s*[\d(]|\s*(?:crores?|lakhs?|million|mn|bn|billion)\b|\))", re.I | re.M)
+
+
 def page_text(page):
     return fix_ligatures(_page_text_raw(page))
 
@@ -47,6 +50,9 @@ def _page_text_raw(page):
         names = ""
     if "rupee" not in names:
         return page.get_text("text")
+    plain = page.get_text("text")
+    if not RUPEE_CANDIDATE_RE.search(plain):
+        return plain  # no stray 'H' or backtick where a rupee sign would be: skip the slow span-by-span read
     lines = []
     for block in page.get_text("dict")["blocks"]:
         for line in block.get("lines", []):

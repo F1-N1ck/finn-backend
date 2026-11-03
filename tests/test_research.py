@@ -450,7 +450,7 @@ def test_flow_good_run_has_full_citations(kpit_pdfs):
     assert cite["doc_title"].startswith("KPIT Technologies Ltd - Annual Report 2026")
     assert cite["excerpt"] and cite["doc_date"]
     claim_cite = brief["sections"]["outlook"]["claims"][0]["citation"]
-    assert claim_cite["url"] == CALL_URL and "August" in claim_cite["doc_date"]
+    assert claim_cite["url"] == CALL_URL and "July 29, 2026" in claim_cite["doc_date"]  # call date, not the covering letter's August date
     assert brief["documents"]["concall"]["date_label"] == "Aug 2026"
     assert any("Oct 2026" in n for n in brief["notes"])
 
@@ -1005,10 +1005,21 @@ def test_label_matches_text():
     assert pipeline.label_matches_text(None, "7th May, 2026") is None
 
 
+def realistic_transcript_pages(call_date="7th May, 2026"):
+    """A transcript-shaped fake: title page with the call date, then moderator/management turns, > 8000 characters."""
+    turns = []
+    for i in range(40):
+        who = "Moderator" if i % 2 == 0 else "Management"
+        turns.append(who + ": " + ("Thank you, the next question is from the line of an analyst. " if who == "Moderator"
+                                    else "We expect demand to remain healthy and margins to hold in the coming quarters. ") * 3)
+    return [{"page": 1, "text": "X Ltd Q4 FY26 Earnings Conference Call " + call_date + " Moderator: Management:"},
+            {"page": 2, "text": "\n".join(turns[:20])}, {"page": 3, "text": "\n".join(turns[20:])}]
+
+
 def test_slow_newest_transcript_is_retried_before_falling_back(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "SLEEP", lambda s: None)
     monkeypatch.setattr(pipeline, "warm_up_bse", lambda *a, **k: None)
-    pdf = fk.make_pdf_from_pages([{"page": 1, "text": "Earnings call transcript dated 7th May, 2026"}])
+    pdf = fk.make_pdf_from_pages(realistic_transcript_pages())
     calls = {"n": 0}
 
     def fake_fetch(url, **kwargs):
@@ -1028,7 +1039,7 @@ def test_slow_newest_transcript_is_retried_before_falling_back(monkeypatch, tmp_
 def test_persistent_timeout_falls_back_to_older_call_and_says_so(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "SLEEP", lambda s: None)
     monkeypatch.setattr(pipeline, "warm_up_bse", lambda *a, **k: None)
-    pdf = fk.make_pdf_from_pages([{"page": 1, "text": "Earnings call transcript dated 7th May, 2026"}])
+    pdf = fk.make_pdf_from_pages(realistic_transcript_pages())
 
     def fake_fetch(url, **kwargs):
         if "newest" in url:
@@ -1095,3 +1106,49 @@ def test_overview_prefers_about_page_and_corporate_information_note_over_csr_and
     assert picked[:2] == [8, 122] or picked[:2] == [122, 8]
     assert 33 not in picked[:2] and 4 not in picked[:2]
     assert all("  " not in p["text"] and "\n" not in p["text"] for p in sections.overview_passages(pages))
+
+
+# ------------------------------------------------------------------ round 6: call date, real transcript check, rupee pre-check
+
+def test_find_call_date_uses_the_call_page_not_the_covering_letter():
+    pages = [{"page": 1, "text": "Dear Sir/Madam, Sub: Transcript of earnings call. Date: October 19, 2026 BSE Limited"},
+             {"page": 2, "text": "Page 1 of 19 Earnings Conference Call October 13, 2026 Moderator: Management:"}]
+    assert pipeline.find_call_date(pages) == "October 13, 2026"
+    hul = [{"page": 1, "text": "Hindustan Unilever Q4 Earnings Call April 30th, 2026 Moderator: Management:"}]
+    assert pipeline.find_call_date(hul) == "April 30th, 2026"
+    assert pipeline.find_call_date([{"page": 1, "text": "Dear Sir, Sub: audio recording August 4, 2026"}]) is None
+
+
+def test_label_matches_text_allows_one_month_difference():
+    assert pipeline.label_matches_text("Aug 2026", "July 29, 2026") is True
+    assert pipeline.label_matches_text("Oct 2026", "May 7, 2026") is False
+
+
+def test_one_page_audio_notice_is_not_a_transcript():
+    notice = [{"page": 1, "text": "Dear Sir, Sub: Intimation of audio recording of earnings call. Link: https://example.com/audio"}]
+    ok, info = pipeline.looks_like_transcript(notice)
+    assert ok is False and info["pages"] == 1
+    assert pipeline.looks_like_transcript(realistic_transcript_pages())[0] is True
+
+
+def test_not_a_transcript_reason_is_plain():
+    reason = pipeline._missing_reason("concall", {"concall_candidates": [1], "annual_report_candidates": [], "notes": []},
+                                      [{"state": "not_a_transcript"}])
+    assert "not a transcript" in reason
+
+
+def test_get_document_skips_an_audio_notice_and_records_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "warm_up_bse", lambda *a, **k: None)
+    notice = fk.make_pdf_from_pages([{"page": 1, "text": "Dear Sir, Sub: audio recording of earnings call"}])
+    monkeypatch.setattr(safe_fetch, "fetch", lambda url, **kw: {"ok": True, "data": notice, "bytes": len(notice), "seconds": 1.0})
+    monkeypatch.setenv("FINN_CACHE_DIR", str(tmp_path))
+    entry = {"label": "Feb 2026", "url": "https://www.bseindia.com/x?Pname=audio.pdf"}
+    doc, skipped = pipeline.get_document("concall", [entry], "X Ltd", None, None, pipeline.Tracker(None), pipeline.limits())
+    assert doc is None and skipped[0]["state"] == "not_a_transcript"
+
+
+def test_rupee_candidate_precheck():
+    from finn.research import extract
+    assert extract.RUPEE_CANDIDATE_RE.search("Revenue H 1,234 crores")
+    assert extract.RUPEE_CANDIDATE_RE.search("EPS `64.01")
+    assert not extract.RUPEE_CANDIDATE_RE.search("Hindustan Unilever has a heritage in India")
