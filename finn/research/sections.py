@@ -169,6 +169,22 @@ def check_text_claims(parsed, passages):
     return report["claims"]
 
 
+LEADING_CURRENCY_RE = re.compile(r"^\s*(?:₹|Rs\.?|INR|`)\s*", re.I)
+
+
+def tidy_value_and_unit(row, per_share):
+    """Show '64.01 ₹ per share', not '₹64.01 ₹'. The checks above already ran on the raw text; this is display only."""
+    raw = row["value"]
+    cleaned = LEADING_CURRENCY_RE.sub("", raw).strip()
+    if cleaned != raw.strip() and cleaned != "":
+        row["value_raw"] = raw
+        row["value"] = cleaned
+        if grounded_qa.normalise(row["unit"]) in ("not stated", ""):
+            row["unit"] = "₹"
+    if per_share and grounded_qa.normalise(row["unit"]) in ("₹", "rs", "inr", "rs.", "rupees"):
+        row["unit"] = "₹ per share"
+
+
 def check_number_items(parsed, passages):
     """Per item: source exists, quote verbatim, value in quote, unit/period/scope words in the passage."""
     rows = []
@@ -227,5 +243,6 @@ def check_number_items(parsed, passages):
                              "line this figure is")
         row["problems"] = problems
         row["auto_pass"] = len(problems) == 0
+        tidy_value_and_unit(row, per_share)
         rows.append(row)
     return rows

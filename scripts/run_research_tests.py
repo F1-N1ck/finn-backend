@@ -1,5 +1,8 @@
 """Run the generic research flow against a deployed FINN and record what happened.
 
+Tip: run it as  caffeinate -i python3 scripts/run_research_tests.py ...  so the Mac does not sleep mid-run
+(a sleep shows up as a long poll gap and inflates the wall time; the script now flags it as client_pause_s).
+
 Usage (Terminal, from the project folder):
     python3 scripts/run_research_tests.py --base https://finn-backend-b4j5.onrender.com --tickers KPITTECH,PIDILITIND,HINDUNILVR,COFORGE
 
@@ -128,8 +131,14 @@ def run_one(base, ticker, max_wait_s, poll_s, report_hook):
     bad_streak = 0
     final = job if job.get("status") != "running" else None
     while final is None and time.time() - started < max_wait_s:
+        before = time.time()
         time.sleep(poll_s)
         info, polled = poll_once(base, job["job_id"])
+        pause = time.time() - before - info.get("seconds", 0)
+        if pause > poll_s + 30:
+            # the loop itself stalled (for example the computer slept); this is NOT server time
+            info["client_pause_s"] = round(pause, 1)
+            record["client_paused_s"] = round(record.get("client_paused_s", 0) + pause, 1)
         record["polls"].append(info)
         report_hook()
         if polled is None:
@@ -146,6 +155,7 @@ def run_one(base, ticker, max_wait_s, poll_s, report_hook):
         if polled["status"] != "running":
             final = polled
     record["wall_s"] = round(time.time() - started, 1)
+    record["active_wall_s"] = round(record["wall_s"] - record.get("client_paused_s", 0), 1)
     if final is None:
         record.setdefault("outcome", "client_timeout" if "outcome" not in record else record["outcome"])
         return record, None
@@ -234,7 +244,7 @@ def main():
         record.clear()
         record.update(result)
         hook()
-        print(" outcome:", record.get("outcome"), "| wall", record.get("wall_s"), "s | server", record.get("server_elapsed_s"),
+        print(" outcome:", record.get("outcome"), "| wall", record.get("wall_s"), "s (active", record.get("active_wall_s"), "s) | server", record.get("server_elapsed_s"),
               "s | sections:", record.get("sections"), "| error:", record.get("error"), flush=True)
         if brief:
             with open("results/research_briefs/" + ticker + ".json", "w") as handle:

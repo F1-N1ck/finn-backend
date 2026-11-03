@@ -978,3 +978,79 @@ def test_model_rate_limit_too_long_is_reported_with_provider_detail():
                                    pacer.TokenPacer(10 ** 9), chat, lambda p: {"status": "ok"}, tracker)
     assert section["status"] == "unavailable" and section["reason"] == "model_rate_limited"
     assert "daily tokens" in section["provider_detail"] and section["retry_after_s"] == 3000.0
+
+
+# ------------------------------------------------------------------ round 4 fixes
+
+def test_eps_value_has_no_duplicate_rupee_sign():
+    passage = {"source_id": "S1", "doc": "annual_report", "page": 186,
+               "text": "Basic (in ₹) ₹64.01 ₹45.32 For Continuing and Discontinued operations consolidated 2026"}
+    parsed = {"items": [{"metric": "Basic earnings per share", "value": "₹64.01", "unit": "₹",
+                         "period": "2026", "scope": "consolidated", "source": "S1", "quote": "Basic (in ₹) ₹64.01"}]}
+    rows = sections.check_number_items(parsed, [passage])
+    assert rows[0]["auto_pass"]
+    assert rows[0]["value"] == "64.01" and rows[0]["unit"] == "₹ per share" and rows[0]["value_raw"] == "₹64.01"
+
+
+def test_plain_value_and_crore_unit_are_left_alone():
+    row = {"value": "64,468", "unit": "₹ crores"}
+    sections.tidy_value_and_unit(row, per_share=False)
+    assert row["value"] == "64,468" and row["unit"] == "₹ crores" and "value_raw" not in row
+
+
+def test_label_matches_text():
+    assert pipeline.label_matches_text("May 2026", "7th May, 2026") is True
+    assert pipeline.label_matches_text("Aug 2026", "7th May, 2026") is False
+    assert pipeline.label_matches_text("Aug 2026", None) is None
+    assert pipeline.label_matches_text(None, "7th May, 2026") is None
+
+
+def test_slow_newest_transcript_is_retried_before_falling_back(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "SLEEP", lambda s: None)
+    monkeypatch.setattr(pipeline, "warm_up_bse", lambda *a, **k: None)
+    pdf = fk.make_pdf_from_pages([{"page": 1, "text": "Earnings call transcript dated 7th May, 2026"}])
+    calls = {"n": 0}
+
+    def fake_fetch(url, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"ok": False, "state": "timeout", "seconds": 20.6}
+        return {"ok": True, "data": pdf, "bytes": len(pdf), "seconds": 3.0}
+    monkeypatch.setattr(safe_fetch, "fetch", fake_fetch)
+    monkeypatch.setenv("FINN_CACHE_DIR", str(tmp_path))
+    tracker = pipeline.Tracker(None)
+    entry = {"label": "Aug 2026", "url": "https://www.bseindia.com/stockinfo/AnnPdfOpen.aspx?Pname=retrytest.pdf"}
+    doc, skipped = pipeline.get_document("concall", [entry], "X Ltd", None, None, tracker, pipeline.limits())
+    assert doc is not None and skipped == [] and calls["n"] == 2
+    assert doc["record"]["label"] == "Aug 2026"
+
+
+def test_persistent_timeout_falls_back_to_older_call_and_says_so(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "SLEEP", lambda s: None)
+    monkeypatch.setattr(pipeline, "warm_up_bse", lambda *a, **k: None)
+    pdf = fk.make_pdf_from_pages([{"page": 1, "text": "Earnings call transcript dated 7th May, 2026"}])
+
+    def fake_fetch(url, **kwargs):
+        if "newest" in url:
+            return {"ok": False, "state": "timeout", "seconds": 20.0}
+        return {"ok": True, "data": pdf, "bytes": len(pdf), "seconds": 1.0}
+    monkeypatch.setattr(safe_fetch, "fetch", fake_fetch)
+    monkeypatch.setenv("FINN_CACHE_DIR", str(tmp_path))
+    entries = [{"label": "Aug 2026", "url": "https://www.bseindia.com/x?Pname=newest.pdf"},
+               {"label": "May 2026", "url": "https://www.bseindia.com/x?Pname=older.pdf"}]
+    doc, skipped = pipeline.get_document("concall", entries, "X Ltd", None, None, pipeline.Tracker(None), pipeline.limits())
+    assert doc["record"]["label"] == "May 2026"
+    assert skipped[0]["label"] == "Aug 2026" and skipped[0]["tries"] == 2 and skipped[0]["state"] == "timeout"
+
+
+def test_flow_outlook_says_when_it_uses_an_older_call(kpit_pdfs):
+    # newest listed transcript is unreachable, the next one works: the outlook section must say so
+    routes = base_routes(kpit_pdfs)
+    older = "https://www.bseindia.com/stockinfo/AnnPdfOpen.aspx?Pname=70c85b6c-58e6-423f-9b32-50b17a948674.pdf"
+    routes[older] = fk.FakeResponse(200, kpit_pdfs["call"])
+    routes[CALL_URL] = fk.FakeResponse(404)
+    out, _ = run_flow(routes)
+    section = out["brief"]["sections"]["outlook"]
+    doc = out["brief"]["documents"]["concall"]
+    assert doc["status"] == "ok" and doc["skipped"][0]["state"] == "not_found"
+    assert "could not be used" in (section.get("note") or "")

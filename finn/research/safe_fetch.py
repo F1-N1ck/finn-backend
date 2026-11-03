@@ -98,7 +98,7 @@ def _result(state, started, **extra):
     return info
 
 
-def fetch(url, session=None, max_bytes=35000000, total_timeout_s=60.0, expect_pdf=False,
+def fetch(url, session=None, max_bytes=35000000, total_timeout_s=60.0, expect_pdf=False, read_timeout_s=20.0,
           resolver=None, referer=None):
     """Download one URL under all the guards. Never raises. Returns a dict with state.
 
@@ -124,7 +124,7 @@ def fetch(url, session=None, max_bytes=35000000, total_timeout_s=60.0, expect_pd
         response = None
         try:
             response = session.get(current, stream=True, allow_redirects=False,
-                                   timeout=(5, min(20, remaining)), headers=headers)
+                                   timeout=(5, min(read_timeout_s, remaining)), headers=headers)
             status = response.status_code
             if status in (301, 302, 303, 307, 308):
                 location = response.headers.get("Location", "")

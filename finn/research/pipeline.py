@@ -146,6 +146,25 @@ def warm_up_bse(session, resolver):
     safe_fetch.fetch(BSE_HOME, session=session, max_bytes=2000000, total_timeout_s=20, resolver=resolver)
 
 
+TRANSIENT_STATES = ("timeout", "inaccessible", "inaccessible_http")
+MONTH_NUMBERS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10,
+                 "nov": 11, "dec": 12}
+
+
+def label_matches_text(label, text_date):
+    """True/False if the month and year in the Screener label agree with the date printed in the transcript;
+    None when either is missing or unreadable."""
+    if not label or not text_date:
+        return None
+    label_match = re.search(r"([A-Za-z]{3})[a-z]*\W+((?:19|20)\d\d)", label)
+    year_match = re.search(r"(?<!\d)((?:19|20)\d\d)(?!\d)", text_date)
+    month_match = re.search(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)", text_date, re.I)
+    if not (label_match and year_match and month_match):
+        return None
+    return (MONTH_NUMBERS[label_match.group(1).lower()] == MONTH_NUMBERS[month_match.group(1).lower()[:3]]
+            and label_match.group(2) == year_match.group(1))
+
+
 def get_document(kind, candidates, company_name, session, resolver, tracker, lim):
     """Try up to 2 candidates (newest first). Returns (doc, skipped). doc is None if none worked."""
     skipped = []
@@ -179,9 +198,22 @@ def get_document(kind, candidates, company_name, session, resolver, tracker, lim
         got = safe_fetch.fetch(url, session=session, max_bytes=lim["max_bytes"],
                                total_timeout_s=min(lim["download_s"], left - 20),
                                expect_pdf=True, resolver=resolver, referer=BSE_HOME)
+        first_try = None
+        if not got["ok"] and got["state"] in TRANSIENT_STATES:
+            # BSE is sometimes slow to answer. Try the same (newest) document once more, with a longer wait,
+            # before settling for an older one.
+            left = lim["deadline_s"] - tracker.elapsed()
+            if left > 90:
+                first_try = {"state": got["state"], "seconds": got["seconds"]}
+                SLEEP(2.0)
+                got = safe_fetch.fetch(url, session=session, max_bytes=lim["max_bytes"],
+                                       total_timeout_s=min(lim["download_s"], left - 40), read_timeout_s=35.0,
+                                       expect_pdf=True, resolver=resolver, referer=BSE_HOME)
         if not got["ok"]:
-            skipped.append({"label": label, "url": url, "state": got["state"]})
-            tracker.finish(stage, "failed", "download: " + got["state"] + " after " + str(got["seconds"]) + " s")
+            skipped.append({"label": label, "url": url, "state": got["state"],
+                            "tries": 2 if first_try else 1, "first_try": first_try})
+            tracker.finish(stage, "failed", "download: " + got["state"] + " after " + str(got["seconds"]) + " s"
+                           + (" (second try; first was " + first_try["state"] + ")" if first_try else ""))
             continue
         fetched_bytes = got["bytes"]
         fetched_seconds = got["seconds"]
@@ -198,6 +230,7 @@ def get_document(kind, candidates, company_name, session, resolver, tracker, lim
             "kind": kind, "title": title.strip(" -"), "label": label, "url": url,
             "host": safe_fetch.host_of(url), "date_label": date_label,
             "date_in_text": find_call_date(pages) if kind == "concall" else None,
+            "date_matches_label": None,
             "fetch": {"source": "fetched_now", "fetched_at": llm_adapter.now_iso(), "bytes": fetched_bytes,
                       "seconds": fetched_seconds},
             "extraction": {"state": extracted["state"], "partial_reason": extracted["partial_reason"],
@@ -205,6 +238,7 @@ def get_document(kind, candidates, company_name, session, resolver, tracker, lim
                            "pdf_title": extracted["pdf_title"], "pdf_created": extracted["pdf_created"],
                            "seconds": extracted["seconds"], "rss_mb_after": extracted.get("rss_mb_after")},
         }
+        record["date_matches_label"] = label_matches_text(label, record["date_in_text"])
         cache.save("docs", doc_key, {"record": record, "pages": pages})
         tracker.finish(stage, "ok", str(extracted["pages_extracted"]) + " of " + str(extracted["page_count"])
                        + " pages, " + str(fetched_bytes) + " bytes; download " + str(fetched_seconds)
@@ -443,6 +477,15 @@ def analyze(symbol, config, callback=None, session=None, resolver=None, chat_fn=
             prompt = sections.OUTLOOK_NO_SPEAKER_PROMPT
             note = ("Speaker roles could not be detected in this transcript, so the passages may include analysts' "
                     "remarks. Read each finding in its source before relying on it.")
+        skipped_calls = [x for x in skipped["concall"] if x.get("url")]
+        if skipped_calls:
+            older = "; ".join(str(x.get("label")) + " (" + str(x.get("state")) + ")" for x in skipped_calls)
+            note = ("The newest listed transcript could not be used: " + older + ". This section is from the "
+                    + str(docs["concall"]["record"].get("label")) + " call, an older call than the newest listed. " + note)
+        if docs["concall"]["record"].get("date_matches_label") is False:
+            note = ("The date printed in the transcript (" + str(docs["concall"]["record"].get("date_in_text"))
+                    + ") does not match the listed label (" + str(docs["concall"]["record"].get("label"))
+                    + "). Check the call date in the source. " + note)
         if len(passages) == 0:
             result_sections["outlook"] = not_found("no passage in the transcript mentions guidance or outlook terms")
         else:
