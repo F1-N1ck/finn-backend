@@ -22,7 +22,23 @@ def rss_mb():
     return None
 
 
+LIGATURES = {"\ufb01": "fi", "\ufb02": "fl", "\ufb00": "ff", "\ufb03": "ffi", "\ufb04": "ffl", "\ufb05": "st", "\ufb06": "st"}
+
+
+def fix_ligatures(text):
+    """PDF fonts often store 'fi', 'fl' as one ligature character, so 'Profit' is read as 'Proﬁt' and no search for
+    'profit' finds it. Spell them out."""
+    for ligature, plain in LIGATURES.items():
+        if ligature in text:
+            text = text.replace(ligature, plain)
+    return text
+
+
 def page_text(page):
+    return fix_ligatures(_page_text_raw(page))
+
+
+def _page_text_raw(page):
     """Page text. Annual reports often draw the rupee sign with a special font whose character code is
     'H' or a backtick; on pages that use such a font, that character is replaced with the real rupee sign."""
     try:

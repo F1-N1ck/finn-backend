@@ -1054,3 +1054,44 @@ def test_flow_outlook_says_when_it_uses_an_older_call(kpit_pdfs):
     doc = out["brief"]["documents"]["concall"]
     assert doc["status"] == "ok" and doc["skipped"][0]["state"] == "not_found"
     assert "could not be used" in (section.get("note") or "")
+
+
+# ------------------------------------------------------------------ retrieval fixes (statement under balance sheet, ligatures, overview)
+
+def test_ligatures_are_spelled_out():
+    assert extract.fix_ligatures("Net Proﬁt for the year, ﬂow, oﬀer") == "Net Profit for the year, flow, offer"
+
+
+def test_income_statement_is_found_without_a_heading_and_below_a_balance_sheet():
+    balance = "Balance Sheet\n₹ lakhs\n" + "Property, plant and equipment 12,707.51\n" * 60
+    statement = ("INCOME\nRevenue from operations 21 3,75,742.37\nOther income 22 18,397.69\nTotal income 3,94,140.06\n"
+                 "Total expenses 3,02,060.27\nProfit before tax 82,510.91\nTax expense 27 19,667.88\n"
+                 "Net Profit for the year 62,843.03\nOther comprehensive income 649.32\nEarnings per equity share (in ₹) Basic 100.89\n")
+    page = {"page": 119, "text": balance + statement}
+    assert sections._statement_score(page["text"]) >= 5
+    passages = sections.numbers_passages([{"page": 1, "text": "Cover page"}, page], max_chars=1200)
+    assert len(passages) == 1 and passages[0]["page"] == 119
+    assert "Net Profit for the year" in passages[0]["text"] and passages[0]["char_start"] > 0
+
+
+def test_notes_and_esg_pages_do_not_look_like_an_income_statement():
+    notes = "Notes forming part of the financial statements\nRevenue from operations is recognised when control passes."
+    assert sections._statement_score(notes) < 5
+
+
+def test_overview_prefers_about_page_and_corporate_information_note_over_csr_and_directory_pages():
+    filler = "Quarterly results were discussed by the board. " * 30
+    csr = ("Our CSR programmes and sustainability targets. Material topics: biodiversity, SDGs, waste management, ESG. "
+           "Lives impacted through CSR. our business segments. our business is engaged in many programmes. " * 6)
+    directory = ("Corporate Information Registered Office Bengaluru Auditors Bankers Registrar Company Secretary "
+                 "Key Managerial Personnel Audit Committee " * 4)
+    about = ("About Acme\nAcme Limited is a global engineering services company established in 1989. "
+             "It provides design and software services to automotive customers. " * 3)
+    note = ("Notes forming part of the financial statements\n1. CORPORATE INFORMATION\nAcme Limited is a public limited "
+            "company incorporated in India. The Company provides product design and engineering services. " * 2)
+    pages = [{"page": 1, "text": filler}, {"page": 4, "text": directory}, {"page": 8, "text": about},
+             {"page": 33, "text": csr}, {"page": 122, "text": note}]
+    picked = [p["page"] for p in sections.overview_passages(pages)]
+    assert picked[:2] == [8, 122] or picked[:2] == [122, 8]
+    assert 33 not in picked[:2] and 4 not in picked[:2]
+    assert all("  " not in p["text"] and "\n" not in p["text"] for p in sections.overview_passages(pages))

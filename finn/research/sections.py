@@ -56,6 +56,7 @@ OVERVIEW_TERMS = {
     "what we do": 3, "our business": 2, "we are a": 3, "is engaged in": 3, "principal activities": 3,
     "nature of business": 3, "is a leading": 2, "is a global": 2, "headquartered": 2, "our offerings": 2,
     "our services": 1.5, "our solutions": 1.5, "incorporated": 1, "segments": 0.5,
+    "pioneers in": 2, "leader in": 2, "our portfolio": 1.5, "our brands": 1, "legacy of": 1,
 }
 ANNUAL_OUTLOOK_TERMS = {
     "outlook": 3, "way forward": 3, "going forward": 2, "we expect": 2, "guidance": 3, "next year": 1.5,
@@ -73,23 +74,95 @@ def _passages_from_windows(pages, terms, top_k, size, doc_key):
     return passages
 
 
-def overview_passages(ar_pages):
-    return _passages_from_windows(ar_pages, OVERVIEW_TERMS, top_k=3, size=1500, doc_key="annual_report")
+OVERVIEW_HEADING_RE = re.compile(
+    r"^\W*(about\b[^.]{0,40}|company overview|business overview|who we are|corporate profile|our business|"
+    r"what we do|at a glance|overview)", re.I)
+DESCRIBES_BUSINESS = ["is engaged in", "are engaged in", "engaged in the business", "provides ", "offers ", "operates through",
+                      "is a global", "is a leading", "is a public limited", "established in", "founded in", "incorporated in",
+                      "headquartered", "primary segments", "reportable segments", "business segments", "services company",
+                      "manufactur"]
+NOT_A_DESCRIPTION = ["csr", "corporate social responsibility", "sustainab", "material topics", "sdgs", "biodiversity",
+                     "brsr", "esg", "lives impacted", "carbon", "waste management", "water consumption", "principle 1",
+                     "ghg", "energy consumption"]
+DIRECTORY_CUES = ["registered office", "bankers", "registrar", "company secretary", "isin", "cin:", "auditors",
+                  "key managerial personnel", "audit committee"]
+
+
+def _squash(text):
+    return " ".join(text.split())
+
+
+def overview_passages(ar_pages, top_k=3, size=1500, step=500):
+    """General rules for 'what does the company do': pages headed 'About ...', 'Company overview', 'Who we are', or the
+    accounting note 'Corporate information' score high; sustainability/CSR pages and director/address directories
+    score low. Text is joined into single spaces first, because narrow-column layouts break phrases across lines."""
+    scored = []
+    for page in ar_pages:
+        text = _squash(page["text"])
+        low = text.lower()
+        if len(low) < 200:
+            continue
+        heading = bool(OVERVIEW_HEADING_RE.match(low[:120])) and not low[:60].startswith(
+            ("about the report", "about this report", "about the annual report"))
+        esg_hits = sum(low.count(cue) for cue in NOT_A_DESCRIPTION)
+        directory_hits = sum(1 for cue in DIRECTORY_CUES if cue in low)
+        best_score = 0.0
+        best_start = 0
+        start = 0
+        while start < max(1, len(low) - size + step):
+            chunk = low[start:start + size]
+            score = 0.0
+            for term, weight in OVERVIEW_TERMS.items():
+                score = score + weight * min(chunk.count(term), 2)  # a phrase repeated on a page is not stronger evidence
+            for term in DESCRIBES_BUSINESS:
+                score = score + 1.0 * min(chunk.count(term), 3)
+            if heading and start == 0:
+                score = score + 6
+            note_at = max(chunk.find("corporate information"), chunk.find("general information"))
+            if note_at >= 0:
+                after = chunk[note_at:note_at + 400]
+                if not any(cue in after for cue in DIRECTORY_CUES):
+                    score = score + 6  # the accounting note 'Corporate information' that opens the notes
+            if score > best_score:
+                best_score = score
+                best_start = start
+            start = start + step
+        if best_score <= 0:
+            continue
+        if esg_hits >= 3 and not heading:
+            best_score = best_score * 0.25
+        if directory_hits >= 3 and "is engaged in" not in low and "provides " not in low:
+            best_score = best_score * 0.3
+        scored.append((best_score, page["page"], best_start, text[best_start:best_start + size]))
+    scored.sort(reverse=True)
+    if scored:
+        floor = scored[0][0] * 0.6  # do not pad the prompt with weak pages
+        scored = [item for item in scored if item[0] >= floor]
+    passages = []
+    for rank, item in enumerate(scored[:top_k]):
+        passages.append({"source_id": "S" + str(rank + 1), "page": item[1], "char_start": item[2], "text": item[3],
+                         "doc": "annual_report"})
+    return passages
+
+
+STATEMENT_LINES = [("revenue from operations", 2.0), ("total income", 1.0), ("total expenses", 1.0),
+                   ("profit before tax", 1.5), ("tax expense", 1.0), ("other comprehensive income", 1.0),
+                   ("earnings per", 1.0), ("per equity share", 0.5)]
+PROFIT_LINE_RE = re.compile(r"(profit|loss)\W+(for the (year|period)|after tax)|net profit|profit/\(loss\) for the")
 
 
 def _statement_score(text):
+    """Looks for the line items of an income statement rather than one heading, because many reports print the
+    statement under the balance sheet on the same page, with no 'Statement of Profit and Loss' title in the text."""
     lowered = " ".join(text.lower().split())
     score = 0.0
-    if "statement of profit and loss" in lowered:
+    if "statement of profit and loss" in lowered or "statement of income" in lowered:
         score += 3
-    if "revenue from operations" in lowered:
+    for phrase, weight in STATEMENT_LINES:
+        if phrase in lowered:
+            score += weight
+    if PROFIT_LINE_RE.search(lowered):
         score += 2
-    if "profit for the year" in lowered or "profit after tax" in lowered or "net profit" in lowered:
-        score += 2
-    if "total income" in lowered:
-        score += 1
-    if "earnings per" in lowered:
-        score += 1
     if "consolidated" in lowered:
         score += 1
     if "notes to" in lowered or "notes forming" in lowered:
@@ -113,16 +186,26 @@ def numbers_passages(ar_pages, max_chars=5000):
         page = item[2]
         if len(chosen) == 0:
             chosen.append(page)
-            lowered = page["text"][:max_chars].lower()
+            lowered = page["text"][_statement_start(page["text"]):][:max_chars].lower()
             if "profit for the year" in lowered or "profit after tax" in lowered or "net profit" in lowered:
                 break
         else:
             chosen.append(page)
     passages = []
     for rank, page in enumerate(chosen):
-        passages.append({"source_id": "S" + str(rank + 1), "page": page["page"], "char_start": 0,
-                         "text": page["text"][:max_chars], "doc": "annual_report"})
+        start = _statement_start(page["text"])
+        passages.append({"source_id": "S" + str(rank + 1), "page": page["page"], "char_start": start,
+                         "text": page["text"][start:start + max_chars], "doc": "annual_report"})
     return passages
+
+
+def _statement_start(text):
+    """When the income statement sits below a balance sheet on the same page, begin the passage just above
+    'Revenue from operations' so a long page is not cut off before the profit lines."""
+    index = text.lower().find("revenue from operations")
+    if index > 600:
+        return max(0, index - 500)
+    return 0
 
 
 def outlook_passages(concall_pages, ar_pages=None):
