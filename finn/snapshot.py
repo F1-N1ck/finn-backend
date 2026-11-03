@@ -72,3 +72,12 @@ def load_pages(doc_id, directory=None):
 
 def cache_path(directory=None):
     return os.path.join(directory or snapshot_dir(), "demo_answers.json")
+
+
+def source_url(doc_id, directory=None):
+    """Public URL the saved document text came from (from MANIFEST.json), or None."""
+    manifest = load_manifest(directory)
+    if manifest is None:
+        return None
+    entry = manifest.get("files", {}).get("text/" + doc_id + ".pages.jsonl")
+    return entry.get("source_url") if entry else None

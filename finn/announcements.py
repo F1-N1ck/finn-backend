@@ -10,12 +10,15 @@ keeps the result in memory and in a small file, and tells the digest exactly wha
   failed           the fetch did not work (timeout, HTTP error, bad body); older data is kept and dated
   snapshot         never refreshed; the committed 31 Oct snapshot is all there is
 
-Only the symbols in digest.PORTFOLIO are ever requested, so this cannot be used as a proxy.
+Symbols come from the request (a user's own selection) or default to the demo portfolio. Each one must be a valid NSE
+ticker; the host is fixed (NSE) and the URL is built here, so this cannot be used as a proxy. No selection is stored as a
+list: only per-company results are kept, and they are facts about companies, not about any user.
 Nothing here touches prices: live prices and live filings are separate things with separate times.
 """
 
 import json
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +35,23 @@ CALL_TIMEOUT_S = 25
 RUN_DEADLINE_S = 170
 WORKERS = 4
 FILE_PREFIX = "https://nsearchives.nseindia.com/"
+SYMBOL_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
+MAX_SYMBOLS = 40
+MAX_KEPT_EXTRA_SYMBOLS = 200  # live results kept for symbols outside the demo portfolio (oldest dropped first)
+FRESH_STATES = ("live", "valid_empty", "ambiguous_empty")
+GOOD_STATES = FRESH_STATES + ("stale_live",)
+
+
+def clean_symbols(symbols, default):
+    """Validated, upper-cased, de-duplicated tickers (at most MAX_SYMBOLS). Invalid ones are dropped, never used."""
+    if symbols is None:
+        return list(default)
+    seen = []
+    for raw in symbols:
+        symbol = str(raw).strip().upper()
+        if SYMBOL_RE.match(symbol) and symbol not in seen:
+            seen.append(symbol)
+    return seen[:MAX_SYMBOLS]
 
 
 def utc_now():
@@ -88,6 +108,9 @@ class FilingsRefresher:
         self.state = {"per_symbol": {}, "last_success_utc": None, "last_attempt_utc": None, "last_run": None}
         self.running = None  # {"started": t, "done": n, "total": n} while a run is in flight
         self.last_start = 0.0
+        self.inflight = set()  # symbols queued or being fetched right now
+        self.queue = []
+        self.last_attempt = {}  # symbol -> clock() of its last start (per-symbol cooldown)
         self._load()
 
     # ------------------------------------------------------------ persistence (best effort)
@@ -120,34 +143,64 @@ class FilingsRefresher:
         with self.lock:
             return json.loads(json.dumps(self.state))
 
-    def status(self):
+    def status(self, symbols=None):
+        """symbols=None: the whole refresher. With symbols: running means one of THESE symbols is queued or fetching."""
         with self.lock:
             run = self.running
-            return {"running": run is not None,
+            if symbols is None:
+                running = run is not None
+            else:
+                running = run is not None and len(self.inflight.intersection(symbols)) > 0
+            return {"running": running,
                     "progress": ({"done": run["done"], "total": run["total"],
-                                  "elapsed_s": round(self.clock() - run["started"], 1)} if run else None),
+                                  "elapsed_s": round(self.clock() - run["started"], 1)} if run and running else None),
+                    "inflight": sorted(self.inflight) if symbols is None else sorted(self.inflight.intersection(symbols)),
                     "last_success_utc": self.state.get("last_success_utc"),
                     "last_attempt_utc": self.state.get("last_attempt_utc"),
                     "last_run": self.state.get("last_run")}
 
-    def start(self):
-        """Start a background refresh. Returns (started, reason)."""
+    def start(self, symbols=None):
+        """Start (or join) a background refresh for these symbols (default: the demo portfolio).
+        Returns (started, reason). A symbol already queued is not queued twice; one attempted within the cooldown is skipped."""
+        wanted = clean_symbols(symbols, self.symbols)
+        spawn = False
         with self.lock:
-            if self.running is not None:
-                return False, "already_running"
-            if self.clock() - self.last_start < self.cooldown_s:
-                return False, "too_soon"
-            self.last_start = self.clock()
-            self.running = {"started": self.clock(), "done": 0, "total": len(self.symbols)}
-        threading.Thread(target=self.run, daemon=True).start()
+            busy = [s for s in wanted if s in self.inflight]
+            now = self.clock()
+            fresh = [s for s in wanted if s not in self.inflight and now - self.last_attempt.get(s, -10 ** 9) >= self.cooldown_s]
+            if not fresh:
+                return False, ("already_running" if busy else "too_soon")
+            for symbol in fresh:
+                self.inflight.add(symbol)
+                self.last_attempt[symbol] = now
+            self.last_start = now
+            if self.running is None:
+                self.running = {"started": now, "done": 0, "total": len(fresh)}
+                self.queue = list(fresh)
+                spawn = True
+            else:
+                self.running["total"] = self.running["total"] + len(fresh)
+                self.queue.extend(fresh)
+        if spawn:
+            threading.Thread(target=self._drain, daemon=True).start()
         return True, None
 
-    def run(self):
-        """Blocking refresh of every portfolio symbol. Safe to call directly in tests."""
+    def _drain(self):
+        while True:
+            with self.lock:
+                batch = list(self.queue)
+                self.queue = []
+            if not batch:
+                return
+            self.run(batch)
+
+    def run(self, symbols=None):
+        """Blocking refresh of these symbols (default: every demo symbol). Safe to call directly in tests."""
+        symbols = clean_symbols(symbols, self.symbols)
         with self.lock:
             if self.running is None:
-                self.running = {"started": self.clock(), "done": 0, "total": len(self.symbols)}
-            started = self.running["started"]
+                self.running = {"started": self.clock(), "done": 0, "total": len(symbols)}
+            started = self.clock()
         started_utc = utc_now()
         outcomes = {}
 
@@ -169,12 +222,13 @@ class FilingsRefresher:
                 self.running["done"] = self.running["done"] + 1
 
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            list(pool.map(one, self.symbols))
+            list(pool.map(one, symbols))
 
-        ok = [s for s in self.symbols if outcomes[s]["state"] != "failed"]
+        ok = [s for s in symbols if outcomes[s]["state"] != "failed"]
         finished_utc = utc_now()
+        covers_demo = set(self.symbols).issubset(set(symbols))
         with self.lock:
-            for symbol in self.symbols:
+            for symbol in symbols:
                 outcome = outcomes[symbol]
                 entry = self.state["per_symbol"].setdefault(symbol, {"good": None})
                 entry["attempt_utc"] = finished_utc
@@ -182,35 +236,58 @@ class FilingsRefresher:
                 entry["detail"] = outcome.get("detail")
                 if outcome["state"] != "failed":
                     entry["good"] = outcome
-            self.state["last_attempt_utc"] = finished_utc
-            if ok:
-                self.state["last_success_utc"] = finished_utc
-            self.state["last_run"] = {"started_utc": started_utc, "finished_utc": finished_utc, "ok": len(ok),
-                                      "failed": len(self.symbols) - len(ok), "total": len(self.symbols),
-                                      "failed_symbols": [s for s in self.symbols if s not in ok]}
-            self.running = None
+            self._trim_extras()
+            run_summary = {"started_utc": started_utc, "finished_utc": finished_utc, "ok": len(ok),
+                           "failed": len(symbols) - len(ok), "total": len(symbols),
+                           "failed_symbols": [s for s in symbols if s not in ok]}
+            if covers_demo:
+                # the run-level summary describes the demo portfolio only when the run covered all of it
+                self.state["last_attempt_utc"] = finished_utc
+                if ok:
+                    self.state["last_success_utc"] = finished_utc
+                self.state["last_run"] = run_summary
+            for symbol in symbols:
+                self.inflight.discard(symbol)
+            if not self.queue:
+                self.running = None
             self._save()
-        return self.state["last_run"]
+        return run_summary
+
+    def _trim_extras(self):
+        """Keep the state file bounded: forget the oldest results for symbols outside the demo portfolio."""
+        extras = [s for s in self.state["per_symbol"] if s not in self.symbols]
+        if len(extras) <= MAX_KEPT_EXTRA_SYMBOLS:
+            return
+        extras.sort(key=lambda s: self.state["per_symbol"][s].get("attempt_utc") or "")
+        for symbol in extras[:len(extras) - MAX_KEPT_EXTRA_SYMBOLS]:
+            del self.state["per_symbol"][symbol]
 
 
 def parse_utc(text):
     return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
-def merge_into_raw(raw_ann, live_state):
+def merge_into_raw(raw_ann, live_state, symbols=None):
     """Return (raw_with_sources, per_symbol_status). Live items replace snapshot items inside the live window;
-    snapshot items older than the live window are kept (they are older, not contradicted)."""
+    snapshot items older than the live window are kept (they are older, not contradicted).
+    With symbols, only those are returned. A symbol with no snapshot and no live result is 'unchecked' (never 'no filings')."""
     merged = {}
     statuses = {}
     per_symbol = (live_state or {}).get("per_symbol", {})
-    for symbol in set(list(raw_ann.keys()) + list(per_symbol.keys())):
+    names = list(symbols) if symbols is not None else sorted(set(list(raw_ann.keys()) + list(per_symbol.keys())))
+    for symbol in names:
+        in_snapshot = symbol in raw_ann
         snap_items = [dict(i, source="snapshot") for i in raw_ann.get(symbol, {}).get("items", [])]
         entry = per_symbol.get(symbol)
         good = entry.get("good") if entry else None
         if good is None:
-            statuses[symbol] = {"state": "failed_snapshot" if entry and entry.get("attempt_state") == "failed"
-                                else "snapshot", "detail": entry.get("detail") if entry else None,
-                                "attempt_utc": entry.get("attempt_utc") if entry else None}
+            failed = bool(entry and entry.get("attempt_state") == "failed")
+            if failed:
+                state = "failed_snapshot" if in_snapshot else "failed"
+            else:
+                state = "snapshot" if in_snapshot else "unchecked"
+            statuses[symbol] = {"state": state, "detail": entry.get("detail") if entry else None,
+                                "attempt_utc": entry.get("attempt_utc") if entry else None, "in_snapshot": in_snapshot}
             merged[symbol] = {"items": snap_items}
             continue
         fetched = good["fetched_utc"]
@@ -228,7 +305,7 @@ def merge_into_raw(raw_ann, live_state):
         statuses[symbol] = {"state": ("stale_live" if stale else good["state"]), "fetched_utc": fetched,
                             "detail": entry.get("detail") if stale else good.get("detail"),
                             "newest_earlier": good.get("newest_earlier"), "count_live": good.get("count", 0),
-                            "attempt_utc": entry.get("attempt_utc")}
+                            "attempt_utc": entry.get("attempt_utc"), "in_snapshot": in_snapshot}
     return merged, statuses
 
 
@@ -252,3 +329,38 @@ def summarise(live_state, statuses, snapshot_fetched_utc, running_status=None):
             "snapshot_fetched_utc": snapshot_fetched_utc, "symbol_counts": counts, "symbols": statuses,
             "running": bool(running_status and running_status.get("running")),
             "progress": running_status.get("progress") if running_status else None}
+
+
+def summarise_for(symbols, live_state, statuses, snapshot_fetched, running_status=None):
+    """The same object as summarise(), but computed from these symbols' own states, so one user's selection
+    never borrows the run summary of another's. mode: snapshot | unchecked | live | partial | refresh_failed."""
+    per = (live_state or {}).get("per_symbol", {})
+    fresh = [s for s in symbols if statuses[s]["state"] in FRESH_STATES]
+    kept = [s for s in symbols if statuses[s]["state"] in GOOD_STATES]
+    attempted = [s for s in symbols if per.get(s, {}).get("attempt_utc")]
+    failed_now = [s for s in symbols if per.get(s, {}).get("attempt_state") == "failed"]
+    fetched = [per[s]["good"]["fetched_utc"] for s in kept if per.get(s, {}).get("good")]
+    attempts = [per[s]["attempt_utc"] for s in attempted]
+    if not symbols:
+        mode = "empty"
+    elif not attempted:
+        mode = "snapshot" if any(statuses[s].get("in_snapshot") for s in symbols) else "unchecked"
+    elif not fresh:
+        mode = "refresh_failed"
+    elif failed_now or len(fresh) < len(symbols):
+        mode = "partial"
+    else:
+        mode = "live"
+    counts = {}
+    for status in statuses.values():
+        counts[status["state"]] = counts.get(status["state"], 0) + 1
+    last_run = None
+    if attempted:
+        last_run = {"ok": len(fresh), "failed": len(failed_now), "total": len(symbols), "failed_symbols": failed_now,
+                    "not_checked": [s for s in symbols if statuses[s]["state"] == "unchecked"]}
+    return {"mode": mode, "last_success_utc": max(fetched) if fetched else None,
+            "last_attempt_utc": max(attempts) if attempts else None, "last_run": last_run,
+            "snapshot_fetched_utc": snapshot_fetched, "symbol_counts": counts, "symbols": statuses,
+            "running": bool(running_status and running_status.get("running")),
+            "progress": running_status.get("progress") if running_status else None,
+            "inflight": (running_status or {}).get("inflight", [])}

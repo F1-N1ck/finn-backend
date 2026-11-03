@@ -1,6 +1,9 @@
 """FINN minimal backend (FastAPI).
 
 Public routes:  GET /healthz, GET /api/questions, POST /api/research,
+                GET /api/portfolio/demo, GET|POST /api/digest, POST /api/filings/refresh, GET /api/filings/status,
+                POST /api/prices/refresh, GET /api/symbols/check, GET /api/symbols/search (a user's own selection is
+                sent in the request body and never stored on the server),
                 POST /api/analyze (any NSE ticker, job based), GET /api/analyze/{job_id}
 Admin routes:   POST /admin/host-check, GET /admin/host-check/{job_id}
                 (bearer token required, fixed targets only, disabled unless enabled by env)
@@ -22,6 +25,8 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from typing import List, Optional
+
 from pydantic import BaseModel, ConfigDict
 
 from finn import announcements, budget, digest, grounded_qa, guidance, hostcheck, llm_adapter, prices, snapshot
@@ -126,26 +131,76 @@ def root():
 FILINGS = announcements.FilingsRefresher()
 
 
-@app.get("/api/digest")
-def get_digest():
+class SymbolsRequest(BaseModel):
+    """One user's selection, sent with the request. Nothing else is accepted (a url or any other field is a 422)."""
+    model_config = ConfigDict(extra="forbid")
+    symbols: List[str]
+
+
+MAX_SYMBOLS = announcements.MAX_SYMBOLS
+
+
+def parse_symbols(request):
+    """Validated, upper-cased, de-duplicated tickers from a request body. A bad ticker is an error, never silently used."""
+    if request is None:
+        return None
+    clean = []
+    for raw in request.symbols:
+        symbol = str(raw).strip().upper()
+        if not announcements.SYMBOL_RE.match(symbol):
+            raise HTTPException(status_code=422, detail={"code": "invalid_symbol", "message": "not a valid NSE ticker"})
+        if symbol not in clean:
+            clean.append(symbol)
+    if len(clean) > MAX_SYMBOLS:
+        raise HTTPException(status_code=422, detail={"code": "too_many_symbols", "message": "at most %d companies" % MAX_SYMBOLS})
+    return clean
+
+
+def build_digest_response(symbols):
+    live_symbols = symbols if symbols is not None else list(digest.PORTFOLIO)
+    in_snapshot = set(digest.PORTFOLIO)
+    extra = [s for s in live_symbols if s not in in_snapshot]
     result = digest.build_digest(questions=grounded_qa.QUESTIONS, live_state=FILINGS.live_state(),
-                                 running_status=FILINGS.status())
+                                 running_status=FILINGS.status(live_symbols), symbols=symbols,
+                                 price_rows=prices.last_known_rows(extra) if extra else None)
     if result is None:
         raise HTTPException(status_code=503, detail={"code": "digest_snapshot_missing"})
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/portfolio/demo")
+def demo_portfolio():
+    """The 16-company starting point every new browser selection begins from. Read-only; nobody's selection is saved here."""
+    return JSONResponse({"symbols": digest.demo_portfolio(),
+                         "note": "Demo portfolio chosen by the builder. Your own selection lives only in your browser."},
+                        headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/digest")
+def get_digest():
+    """The shared demo portfolio. A user's own selection uses POST /api/digest and is never stored here."""
+    return build_digest_response(None)
+
+
+@app.post("/api/digest")
+def post_digest(request: SymbolsRequest):
+    return build_digest_response(parse_symbols(request))
+
+
 @app.post("/api/filings/refresh", status_code=202)
-def refresh_filings():
-    """Start a background NSE announcements refresh for the demo portfolio (not prices). Poll /api/filings/status."""
-    started, reason = FILINGS.start()
-    return JSONResponse(dict(FILINGS.status(), started=started, reason=reason), status_code=202,
+def refresh_filings(request: Optional[SymbolsRequest] = None):
+    """Start a background NSE announcements refresh for the demo portfolio, or for the tickers in the body (not prices).
+    Poll /api/filings/status."""
+    symbols = parse_symbols(request)
+    started, reason = FILINGS.start(symbols)
+    return JSONResponse(dict(FILINGS.status(symbols), started=started, reason=reason), status_code=202,
                         headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/filings/status")
-def filings_status():
-    return JSONResponse(FILINGS.status(), headers={"Cache-Control": "no-store"})
+def filings_status(symbols: str = ""):
+    wanted = announcements.clean_symbols(symbols.split(","), []) if symbols else None
+    return JSONResponse(FILINGS.status(wanted), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/guidance")
@@ -153,20 +208,45 @@ def get_guidance():
     return JSONResponse(guidance.evaluate_all(), headers={"Cache-Control": "no-store"})
 
 
-LAST_PRICE_REFRESH = {"at": 0.0}
-
-
 @app.post("/api/prices/refresh")
-def refresh_prices():
-    """Live Yahoo prices for the fixed demo portfolio. Cached 120 s; at most one real refresh per 20 s."""
-    now = time.time()
-    if now - LAST_PRICE_REFRESH["at"] < 20 and prices._cache["data"] is None:
-        raise HTTPException(status_code=429, detail={"code": "refresh_too_soon"})
-    LAST_PRICE_REFRESH["at"] = now
-    payload, _ = prices.refresh_all()
+def refresh_prices(request: Optional[SymbolsRequest] = None):
+    """Live Yahoo prices (end-of-day bars) for the demo portfolio, or for the tickers in the body.
+    Cached 120 s per symbol; one global limit on live calls."""
+    symbols = parse_symbols(request)
+    if symbols is None:
+        symbols = list(digest.PORTFOLIO)
+    if len(symbols) == 0:
+        raise HTTPException(status_code=422, detail={"code": "no_symbols"})
+    payload = prices.refresh(symbols)
     if payload["ok_count"] == 0:
-        raise HTTPException(status_code=503, detail={"code": "live_prices_unavailable"})
+        limited = any(r.get("error") == "rate_limited" for r in payload["rows"])
+        raise HTTPException(status_code=429 if limited else 503,
+                            detail={"code": "refresh_too_soon" if limited else "live_prices_unavailable"})
     return payload
+
+
+@app.get("/api/symbols/check")
+def check_symbol(symbol: str = ""):
+    """Is this an NSE-listed equity? Answers valid / not_found / check_failed; check_failed means it could not be
+    confirmed, so the caller must not add the company."""
+    cleaned = symbol.strip().upper()
+    if not announcements.SYMBOL_RE.match(cleaned):
+        raise HTTPException(status_code=422, detail={"code": "invalid_symbol", "message": "not a valid NSE ticker"})
+    return JSONResponse(prices.check_symbol(cleaned), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/symbols/search")
+def search_symbols(q: str = ""):
+    """Name or ticker search over NSE equities (Yahoo search). 503 when the source cannot answer."""
+    text = q.strip()
+    if not prices.QUERY_RE.match(text):
+        raise HTTPException(status_code=422, detail={"code": "invalid_query", "message": "use 2 to 30 letters, digits, & . or -"})
+    try:
+        found = prices.search_companies(text)
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail={"code": "search_unavailable", "message": str(error)})
+    return JSONResponse({"query": text, "results": found, "source": "Yahoo Finance search, NSE equities only"},
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.get("/healthz")
@@ -196,7 +276,8 @@ def list_questions():
                       "label": llm_adapter.make_label("cached", entry.get("model"), entry.get("generated_at"),
                                                       entry.get("verification", ""), entry.get("source_type", "model"))}
         items.append({"id": question["id"], "doc": question["doc"], "symbol": question.get("symbol"),
-                      "short": question.get("short"), "question": question["question"], "cached": cached})
+                      "short": question.get("short"), "question": question["question"], "cached": cached,
+                      "source_url": snapshot.source_url(question["doc"])})
     return {"questions": items}
 
 
@@ -242,6 +323,9 @@ def research(request: ResearchRequest):
     if record.get("outcome") == "cached" and reason and reason.get("code") == "live_not_attempted" and skip_reason:
         record["fallback_reason"] = {"code": skip_reason, "message": reason.get("message")}
     record["mode"] = record.pop("outcome")
+    record["source_url"] = snapshot.source_url(question["doc"])
+    record["short"] = question.get("short")
+    record["doc"] = question["doc"]
     record["disclaimer"] = ("Passages are top-k retrieval, not the whole document; the answer may omit relevant "
                             "statements. Mechanical checks do not verify meaning.")
     return record
@@ -262,6 +346,9 @@ def snapshot_fallback(symbol, reason):
         record = grounded_qa.run_question(get_config(), question, pages, snapshot.cache_path(), allow_live=False)
         if record.get("outcome") == "cached":
             record["mode"] = record.pop("outcome")
+            record["source_url"] = snapshot.source_url(question["doc"])
+            record["short"] = question.get("short")
+            record["doc"] = question["doc"]
             answers.append(record)
     if len(answers) == 0:
         return None

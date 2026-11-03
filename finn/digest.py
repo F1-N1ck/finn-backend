@@ -38,6 +38,13 @@ def _load_json(name, directory):
     return data
 
 
+def demo_portfolio(directory=None):
+    """The shared starting point: [{'symbol','name'}] for the demo portfolio. A user's own selection is never stored here."""
+    directory = directory or snapshot.snapshot_dir()
+    raw_px = _load_json("raw_prices.json", directory) or {}
+    return [{"symbol": symbol, "name": (raw_px.get(symbol) or {}).get("name")} for symbol in PORTFOLIO]
+
+
 def tier_for(desc, text):
     """Return (tier, reason). tier is high, medium or low."""
     key = (desc or "").strip().lower()
@@ -111,6 +118,11 @@ def research_symbols(questions):
 def _empty_note(symbol, status, meta):
     """One honest sentence for a symbol with no filings in view. Says which kind of 'nothing' it is."""
     state = status["state"]
+    if state == "unchecked":
+        return "Not checked yet. FINN has no filings data for this company until a live check on NSE has run."
+    if state == "failed":
+        return ("The live check on NSE failed (" + str(status.get("detail") or "no detail") + "), and there is no "
+                "saved copy. Nothing is known about this company's filings.")
     if state == "valid_empty":
         newest = status.get("newest_earlier")
         return ("No filings in the last 7 days. Checked live on NSE at " + status["fetched_utc"] + "; NSE does list "
@@ -127,7 +139,10 @@ def _empty_note(symbol, status, meta):
     return None
 
 
-def build_digest(directory=None, questions=(), live_state=None, running_status=None):
+def build_digest(directory=None, questions=(), live_state=None, running_status=None, symbols=None, price_rows=None):
+    """symbols=None is the demo portfolio (GET /api/digest). With symbols it is one user's selection: only those
+    companies appear, each with its own price source and filings state. price_rows holds live prices the server
+    already has for symbols that are not in the snapshot (never fetched here)."""
     from finn import announcements  # late import: announcements imports this module
     directory = directory or snapshot.snapshot_dir()
     raw_ann = _load_json("raw_announcements.json", directory)
@@ -135,34 +150,57 @@ def build_digest(directory=None, questions=(), live_state=None, running_status=N
     meta = _load_json("digest_meta.json", directory)
     if raw_ann is None or raw_px is None or meta is None:
         return None
+    custom = symbols is not None
+    wanted = list(symbols) if custom else list(PORTFOLIO)
+    price_rows = price_rows or {}
     snapshot_fetched = meta["announcements"]["fetched_utc"]
-    merged, statuses = announcements.merge_into_raw(raw_ann, live_state)
-    filings = build_filings(merged)
+    merged, statuses = announcements.merge_into_raw(raw_ann, live_state, wanted)
+    inflight = set((running_status or {}).get("inflight", []))
+    for symbol in wanted:
+        statuses[symbol]["refreshing"] = symbol in inflight
+    filings = build_filings({s: merged[s] for s in wanted if s in merged})
     with_research = research_symbols(questions)
     portfolio = []
-    for symbol in PORTFOLIO:
-        entry = {"symbol": symbol, "name": None, "has_research": symbol in with_research}
+    for symbol in wanted:
+        entry = {"symbol": symbol, "name": None, "has_research": symbol in with_research,
+                 "in_snapshot": symbol in raw_ann, "price_source": "none"}
         px = raw_px.get(symbol)
         if px and px.get("bars"):
             entry["name"] = px.get("name")
             stats = price_stats(px["bars"])
             if stats:
                 entry.update(stats)
+                entry["price_source"] = "snapshot"
+        elif symbol in price_rows:
+            row = price_rows[symbol]
+            entry["name"] = row.get("name")
+            for key in ("last_date", "close", "prev_close", "change_pct", "volume", "avg_volume_20d", "volume_ratio"):
+                entry[key] = row.get(key)
+            entry["price_source"] = "live_cache"
+            entry["price_fetched_utc"] = row.get("fetched_utc")
+            entry["price_partial"] = bool(row.get("partial"))
         mine = [f for f in filings if f["symbol"] == symbol]
-        status = statuses.get(symbol, {"state": "snapshot"})
+        status = statuses[symbol]
         entry["filings_count"] = len(mine)
         entry["filings_high"] = len([f for f in mine if f["tier"] == "high"])
         entry["filings_state"] = status["state"]
-        if len(mine) == 0 or status["state"] in ("valid_empty", "ambiguous_empty"):
+        entry["refreshing"] = status["refreshing"]
+        if len(mine) == 0 or status["state"] in ("valid_empty", "ambiguous_empty", "unchecked", "failed"):
             note = _empty_note(symbol, status, meta)
             if note:
                 entry["no_filings_note"] = note
         portfolio.append(entry)
-    summary = announcements.summarise(live_state, statuses, snapshot_fetched, running_status)
-    as_of = summary["last_success_utc"] or snapshot_fetched
+    if custom:
+        summary = announcements.summarise_for(wanted, live_state, statuses, snapshot_fetched, running_status)
+        as_of = summary["last_success_utc"]
+        if as_of is None and any(statuses[s].get("in_snapshot") for s in wanted):
+            as_of = snapshot_fetched
+    else:
+        summary = announcements.summarise(live_state, statuses, snapshot_fetched, running_status)
+        as_of = summary["last_success_utc"] or snapshot_fetched
     if summary["last_success_utc"]:
         label = ("FILINGS: NSE API, last successful refresh " + summary["last_success_utc"] + " (" + summary["mode"] +
-                 "); symbols not refreshed show the " + snapshot_fetched + " snapshot | prices fetched " +
+                 "); symbols not refreshed show the " + snapshot_fetched + " snapshot where one exists | prices fetched " +
                  meta["prices"]["fetched_utc"] + " (Yahoo), last bar " + meta["prices"]["last_bar"])
     else:
         label = ("SNAPSHOT | filings fetched " + snapshot_fetched + " (NSE API) | prices fetched " +

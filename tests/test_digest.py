@@ -101,12 +101,12 @@ def test_live_fetch_parses_and_skips_null_bars(monkeypatch):
     assert stats["close"] == 124.0
 
 
-def test_live_fetch_rejects_symbols_outside_portfolio(monkeypatch):
+def test_live_fetch_rejects_malformed_symbols_without_calling_yahoo(monkeypatch):
     def boom(*a, **k):
-        raise AssertionError("must not call Yahoo for an unknown symbol")
+        raise AssertionError("must not call Yahoo for a malformed symbol")
     monkeypatch.setattr(prices.requests, "get", boom)
-    assert prices.fetch_symbol("EVIL/../x")["ok"] is False
-    assert prices.fetch_symbol("NOTINPORTFOLIO")["ok"] is False
+    for bad in ("EVIL/../x", "tcs", "A B", "", "X" * 21, "http://evil.example", None):
+        assert prices.fetch_symbol(bad)["ok"] is False
 
 
 def test_live_fetch_reports_http_errors_without_raising(monkeypatch):
@@ -121,9 +121,7 @@ def test_live_fetch_reports_http_errors_without_raising(monkeypatch):
 
 
 def test_refresh_endpoint_503_when_all_symbols_fail(monkeypatch):
-    prices._cache["data"] = None
-    prices._cache["at"] = 0.0
-    main.LAST_PRICE_REFRESH["at"] = 0.0
+    prices.clear_cache()
     monkeypatch.setattr(prices, "fetch_symbol", lambda symbol, now=None: {"symbol": symbol, "ok": False, "error": "x"})
     response = client.post("/api/prices/refresh")
     assert response.status_code == 503
@@ -131,9 +129,7 @@ def test_refresh_endpoint_503_when_all_symbols_fail(monkeypatch):
 
 
 def test_refresh_endpoint_ok_and_cached(monkeypatch):
-    prices._cache["data"] = None
-    prices._cache["at"] = 0.0
-    main.LAST_PRICE_REFRESH["at"] = 0.0
+    prices.clear_cache()
     calls = {"n": 0}
 
     def fake(symbol, now=None):
@@ -145,4 +141,4 @@ def test_refresh_endpoint_ok_and_cached(monkeypatch):
     assert first.status_code == 200 and second.status_code == 200
     assert first.json()["ok_count"] == 16
     assert calls["n"] == 16  # second call served from the 120 s cache
-    prices._cache["data"] = None
+    prices.clear_cache()

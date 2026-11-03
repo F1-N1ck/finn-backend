@@ -159,9 +159,15 @@ def test_endpoints_and_no_proxy_surface(tmp_path):
         body = client.get("/api/digest").json()
         assert body["filings_status"]["mode"] == "live" and body["filings_status"]["last_success_utc"]
         assert client.get("/api/filings/status").json()["running"] is False
-        # the refresh endpoint takes no parameters: a symbol or URL in the body or query is ignored
+        # the refresh endpoint accepts only a list of valid tickers: a url or any other field is rejected, not ignored
         refresher.cooldown_s = 0
         response = client.post("/api/filings/refresh?symbol=EVIL&url=https://evil.example", json={"url": "x"})
+        assert response.status_code == 422
+        response = client.post("/api/filings/refresh", json={"symbols": ["TCS"], "url": "https://evil.example"})
+        assert response.status_code == 422
+        response = client.post("/api/filings/refresh", json={"symbols": ["TCS", "http://evil.example/x"]})
+        assert response.status_code == 422 and response.json()["detail"]["code"] == "invalid_symbol"
+        response = client.post("/api/filings/refresh")
         assert response.status_code == 202
         assert set(refresher.symbols) == set(digest.PORTFOLIO)
     finally:
@@ -247,3 +253,18 @@ def test_altered_quote_withholds_the_comparison(tmp_path, monkeypatch):
 def test_guidance_endpoint():
     body = TestClient(main.app).get("/api/guidance").json()
     assert body["examples"][0]["symbol"] == "HINDUNILVR" and body["not_verified"]
+
+
+def test_questions_and_cached_research_carry_source_links():
+    """The redesigned UI links every saved answer to its original PDF; the link comes from the snapshot manifest."""
+    from fastapi.testclient import TestClient
+    import app.main as main
+    client = TestClient(main.app)
+    questions = client.get("/api/questions").json()["questions"]
+    assert questions
+    for question in questions:
+        assert question["source_url"].startswith("https://www.bseindia.com/")
+        record = client.post("/api/research", json={"question_id": question["id"], "mode": "cached"}).json()
+        assert record["source_url"] == question["source_url"]
+        assert record["doc"] == question["doc"] and record["short"] == question["short"]
+        assert record["source_type"] == "operator_extract"  # never presented as model output

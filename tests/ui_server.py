@@ -28,19 +28,57 @@ def fake_chat(config, messages):
             "rate_limit_headers": {}, "cost_usd_estimate": None}
 
 
+ADDABLE = {  # tickers the fake Yahoo knows (valid NSE equities) and their names
+    "BAJFINANCE": "Bajaj Finance Limited", "ASIANPAINT": "Asian Paints Limited", "HAVELLS": "Havells India Limited",
+    "ETERNAL": "Eternal Limited", "FAILCO": "Fail Co Limited (test: NSE filings check fails)",
+    "NOPRICE": "No Price Co Limited (test: price source fails)", "TATAMOTORS": "Tata Motors Limited", "TATASTEEL": "Tata Steel Limited",
+}
+
+
 def fake_fetch_symbol(symbol, now=None):
     raw = digest._load_json("raw_prices.json", "data/snapshot")
-    stats = digest.price_stats(raw[symbol]["bars"])
-    stats["close"] = round(stats["close"] * 1.01, 2)
-    stats["change_pct"] = 1.5
+    if symbol in raw:
+        stats = digest.price_stats(raw[symbol]["bars"])
+        stats["close"] = round(stats["close"] * 1.01, 2)
+        stats["change_pct"] = 1.5
+    elif symbol == "NOPRICE":
+        return {"symbol": symbol, "ok": False, "error": "ReadTimeout"}
+    elif symbol in ADDABLE:
+        stats = {"last_date": "2026-10-30", "close": 1234.5, "prev_close": 1200.0, "change_pct": 2.88, "volume": 500000,
+                 "avg_volume_20d": 400000, "volume_ratio": 1.25, "name": ADDABLE[symbol]}
+    else:
+        return {"symbol": symbol, "ok": False, "error": "not_found"}
     stats["partial"] = False
     stats["symbol"] = symbol
     stats["ok"] = True
     return stats
 
 
+def fake_check_symbol(symbol):
+    if symbol in ("SLOWCHK",):
+        return {"symbol": symbol, "state": "check_failed", "error": "ReadTimeout"}
+    if symbol in ADDABLE or symbol in digest.PORTFOLIO:
+        name = ADDABLE.get(symbol) or (digest._load_json("raw_prices.json", "data/snapshot").get(symbol) or {}).get("name") or symbol
+        return {"symbol": symbol, "state": "valid", "name": name, "last_close": 100.0}
+    return {"symbol": symbol, "state": "not_found"}
+
+
+def fake_search_companies(query):
+    if query.lower().startswith("down"):
+        raise RuntimeError("HTTP 429")
+    q = query.lower()
+    found = [{"symbol": s, "name": n.split(" (")[0]} for s, n in ADDABLE.items() if q in s.lower() or q in n.lower()]
+    for symbol in digest.PORTFOLIO:
+        name = (digest._load_json("raw_prices.json", "data/snapshot").get(symbol) or {}).get("name") or symbol
+        if (q in symbol.lower() or q in name.lower()) and symbol not in ADDABLE:
+            found.append({"symbol": symbol, "name": name})
+    return found[:8]
+
+
 llm_adapter.chat = fake_chat
 prices.fetch_symbol = fake_fetch_symbol
+prices.check_symbol = fake_check_symbol
+prices.search_companies = fake_search_companies
 
 
 def install_fake_research():
@@ -93,7 +131,7 @@ def install_fake_filings():
 
     def fake_fetch(symbol):
         time.sleep(0.4)
-        if symbol == "SBIN":
+        if symbol in ("SBIN", "FAILCO"):
             return {"symbol": symbol, "verdict": "fetch_error", "detail": "ReadTimeout", "status": None}
         if symbol == "TCS":
             return {"symbol": symbol, "verdict": "valid_empty_window", "newest_filing_in_wide_window": "19-Oct-2026",

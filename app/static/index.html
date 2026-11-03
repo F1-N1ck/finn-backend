@@ -3,122 +3,216 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0f766e">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0c1117" media="(prefers-color-scheme: dark)">
   <meta name="color-scheme" content="light dark">
-  <title>FINN</title>
+  <title>FINN · Investor briefing (demo)</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
-  <header class="top">
-    <div class="brand">
-      <span class="logo" aria-hidden="true">F</span>
-      <div>
-        <h1>FINN</h1>
-        <p class="tagline">Your portfolio, from primary sources</p>
-      </div>
-    </div>
-  </header>
+<body class="is-landing">
+  <a class="skip" id="skip" href="#landing-main">Skip to content</a>
 
-  <main id="main">
-    <section id="tab-digest" class="tab" role="tabpanel" aria-labelledby="btn-digest">
-      <div id="status" class="status" role="status">Loading digest…</div>
+  <!-- ============================== LANDING (shown until a demo name is set) ============================== -->
+  <div id="landing" class="landing">
+    <header class="l-bar">
+      <div class="brand"><svg viewBox="0 0 28 20" aria-hidden="true" focusable="false"><path d="M1 17l6-7 5 4 7-10 8 6"/></svg><span class="wm">FINN</span></div>
+      <span class="demo-pill">Demo</span>
+    </header>
 
-      <div class="card controls">
-        <div class="row">
-          <span class="label">Window</span>
-          <div class="seg" id="window-seg" role="group" aria-label="Digest window">
-            <button type="button" data-hours="24" class="on">24h</button>
-            <button type="button" data-hours="72">3 days</button>
-            <button type="button" data-hours="168">7 days</button>
-          </div>
+    <main id="landing-main" class="l-main" tabindex="-1">
+      <section class="l-hero" aria-labelledby="l-h">
+        <div class="l-copy">
+          <p class="kicker">Portfolio briefing for Indian equities</p>
+          <h1 id="l-h">Read what companies file. Check what they said.</h1>
+          <p class="l-lede">FINN turns exchange filings into a short daily briefing, and answers research questions only from a company's annual report and earnings call, with the quote, page and original document behind every claim.</p>
         </div>
-        <div class="row">
-          <label class="label" for="vol-input">Volume alert at</label>
-          <div class="stepper">
-            <button type="button" id="vol-minus" aria-label="Lower volume threshold">−</button>
-            <output id="vol-out">2.0×</output>
-            <button type="button" id="vol-plus" aria-label="Raise volume threshold">+</button>
-          </div>
-        </div>
-        <div class="row">
-          <span class="label">Price move alert at</span>
-          <div class="stepper">
-            <button type="button" id="move-minus" aria-label="Lower move threshold">−</button>
-            <output id="move-out">±3%</output>
-            <button type="button" id="move-plus" aria-label="Raise move threshold">+</button>
-          </div>
-        </div>
-        <div class="row">
-          <button type="button" id="refresh-btn" class="btn secondary">Refresh prices (live)</button>
-          <span id="refresh-note" class="hint"></span>
-          <span class="hint">Prices only. Filings have their own refresh below.</span>
-        </div>
-      </div>
 
-      <h2 class="section">Alerts <span id="alert-count" class="count"></span></h2>
-      <div id="alerts" class="stack"></div>
-
-      <h2 class="section">Filings <span id="filing-count" class="count"></span></h2>
-      <div id="filings-status" class="card fstatus" role="status" aria-live="polite">Loading filings status…</div>
-      <div id="filings" class="stack"></div>
-
-      <h2 class="section">Portfolio <span class="count">16 stocks</span></h2>
-      <div id="portfolio" class="card list"></div>
-
-      <p class="foot">Demo portfolio chosen by the builder. Rule-based tiers, no model. Not investment advice.</p>
-    </section>
-
-    <section id="tab-research" class="tab" role="tabpanel" aria-labelledby="btn-research" hidden>
-      <div class="card">
-        <h2 class="section flush">Analyse any NSE company</h2>
-        <div id="filing-context"></div>
-        <p class="hint">Finds the latest annual report and earnings-call transcript, reads them, and writes a short cited brief. Usually 1.5 to 4 minutes on the free server (the model call is rate-paced).</p>
-        <form id="analyze-form" class="ticker-row" autocomplete="off">
-          <input id="ticker-input" type="text" maxlength="20" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="NSE ticker, e.g. PIDILITIND" aria-label="NSE ticker">
-          <button type="submit" id="analyze-btn" class="btn">Analyse</button>
+        <form id="signin" class="l-card" autocomplete="off" aria-labelledby="signin-h">
+          <h2 id="signin-h">Try the demo</h2>
+          <label for="signin-name" class="field-label">Display name</label>
+          <input id="signin-name" name="display-name" type="text" maxlength="40" autocomplete="nickname" autocapitalize="words" spellcheck="false" aria-describedby="signin-help signin-error" placeholder="e.g. Asha">
+          <p id="signin-error" class="inline-error" role="alert" hidden></p>
+          <button type="submit" class="btn primary wide">Enter FINN</button>
+          <ul id="signin-help" class="fine">
+            <li><b>Demo sign-in only.</b> There is no password and no account. It is not a secure login.</li>
+            <li>Your name is saved <b>only in this browser, on this device</b>. It is never sent to FINN's server.</li>
+            <li>Anyone using this browser can see it. Sign out or change it any time in Profile.</li>
+          </ul>
         </form>
-        <div id="analyze-progress" aria-live="polite"></div>
-      </div>
-      <div id="brief" aria-live="polite"></div>
+      </section>
 
-      <h2 class="section">Guidance vs outcome</h2>
-      <div id="guidance" class="stack"><div class="empty">Loading…</div></div>
+      <div class="l-art" aria-hidden="true"><img src="/static/hero.svg" alt="" width="1200" height="300"></div>
 
-      <h2 class="section">Saved KPIT demo</h2>
-      <div class="card">
-        <p class="hint">Two fixed questions on KPITTECH documents saved with the app. Cached answers are labelled; Live asks the model now.</p>
-        <div id="questions" class="stack"></div>
-        <div class="row">
-          <span class="label">Mode</span>
-          <div class="seg" id="mode-seg" role="group" aria-label="Answer mode">
-            <button type="button" data-mode="cached" class="on">Cached</button>
-            <button type="button" data-mode="live">Live (Groq)</button>
-          </div>
+      <section class="l-points" aria-label="What FINN does">
+        <div>
+          <h2>Today</h2>
+          <p>Prioritised exchange filings for your own portfolio (it starts with 16 demo companies you can change), with compact volume and price signals. Each source is marked live or saved, with its time.</p>
         </div>
-        <button type="button" id="run-btn" class="btn" disabled>Choose a question</button>
-      </div>
-      <div id="result" aria-live="polite"></div>
-    </section>
-  </main>
+        <div>
+          <h2>Research</h2>
+          <p>Ask about any NSE company. Answers come only from its latest annual report and earnings-call transcript, and each claim opens its supporting quote.</p>
+        </div>
+        <div>
+          <h2>Honest about limits</h2>
+          <p>End-of-day prices are labelled as such. Guidance is only compared with results when metric, period and scope match.</p>
+        </div>
+      </section>
 
-  <div id="sheet" class="sheet" hidden>
-    <div class="sheet-body" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
-      <div class="sheet-head">
-        <h3 id="sheet-title"></h3>
-        <button type="button" id="sheet-close" class="icon-btn" aria-label="Close">✕</button>
-      </div>
-      <div id="sheet-content"></div>
-    </div>
+      <footer class="l-foot">
+        <p>FINN is an independent prototype built for the ENAM AI Engineer Build Challenge. It is not an ENAM product and is not affiliated with or endorsed by ENAM.</p>
+        <p>Demo data. Not investment advice.</p>
+      </footer>
+    </main>
   </div>
 
-  <nav class="tabbar" aria-label="Sections">
-    <button type="button" id="btn-digest" class="on" data-tab="digest" role="tab" aria-selected="true">
-      <span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg></span>Digest
-    </button>
-    <button type="button" id="btn-research" data-tab="research" role="tab" aria-selected="false">
-      <span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg></span>Research
-    </button>
-  </nav>
+  <!-- ============================== APP (shown after the demo sign-in) ============================== -->
+  <div class="shell" id="shell" hidden>
+    <nav class="nav" aria-label="Primary">
+      <div class="wordmark"><div class="brand"><svg viewBox="0 0 28 20" aria-hidden="true" focusable="false"><path d="M1 17l6-7 5 4 7-10 8 6"/></svg><span class="wm">FINN</span></div><span class="wm-sub">Investor briefing</span></div>
+      <button type="button" id="nav-today" class="nav-item on" data-view="today" aria-current="page">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 4h14M5 9h14M5 14h9M5 19h6"/></svg>
+        <span>Today</span>
+      </button>
+      <button type="button" id="nav-portfolio" class="nav-item" data-view="portfolio">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 8h16v11H4zM9 8V5h6v3M4 13h16"/></svg>
+        <span>Portfolio</span>
+      </button>
+      <button type="button" id="nav-research" class="nav-item" data-view="research">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg>
+        <span>Research</span>
+      </button>
+      <button type="button" id="nav-profile" class="nav-item" data-view="profile">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="8" r="4"/><path d="M4 20c1.5-4 4.5-5.5 8-5.5s6.5 1.5 8 5.5"/></svg>
+        <span>Profile</span>
+      </button>
+      <p class="nav-user" id="nav-user"></p>
+    </nav>
+
+    <main id="main" class="main" tabindex="-1">
+      <!-- ============================== TODAY ============================== -->
+      <section id="view-today" class="view" aria-labelledby="today-h">
+        <header class="page-head">
+          <div>
+            <p class="kicker" id="today-kicker">FINN</p>
+            <h1 id="today-h" class="serif">Today</h1>
+          </div>
+          <button type="button" id="open-filters" class="btn quiet" aria-haspopup="dialog">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+            <span>Filters</span><span id="filter-badge" class="badge" hidden></span>
+          </button>
+        </header>
+
+        <div id="freshness" class="fresh" role="group" aria-label="Data freshness"><p class="hint" style="padding:12px 0;margin:0">Checking how fresh the data is…</p></div>
+        <p id="coverage" class="coverage" hidden></p>
+
+        <div id="today-empty" class="pf-empty" hidden></div>
+
+        <div class="today-grid" id="today-grid">
+          <div class="col-main">
+            <section class="blk" id="blk-priority" aria-labelledby="h-priority">
+              <h2 id="h-priority" class="serif">Priority filings <span class="count" id="priority-count"></span></h2>
+              <p class="window-note" id="window-note"></p>
+              <div id="priority" class="feed" aria-busy="true"><div class="skeleton">Loading filings…</div></div>
+            </section>
+            <section class="blk" id="blk-others" aria-labelledby="h-others">
+              <h2 id="h-others" class="serif">Other filings <span class="count" id="others-count"></span></h2>
+              <div id="others" class="feed"></div>
+            </section>
+          </div>
+          <div class="col-side">
+            <section class="blk" id="blk-signals" aria-labelledby="h-signals">
+              <h2 id="h-signals" class="serif">Market signals <span class="count" id="signals-count"></span></h2>
+              <p class="window-note" id="signals-note"></p>
+              <div id="signals" class="rows"></div>
+            </section>
+            <section class="blk" id="blk-watch" aria-labelledby="h-watch">
+              <h2 id="h-watch" class="serif">Your portfolio</h2>
+              <p class="window-note" id="watch-note"></p>
+              <div id="watchlist" class="rows" aria-busy="true"><div class="skeleton">Loading prices…</div></div>
+            </section>
+          </div>
+        </div>
+        <p class="foot" id="today-foot">Companies come from your Portfolio. Filing priority is rule-based, with no model. Not investment advice.</p>
+      </section>
+
+      <!-- ============================= PORTFOLIO ============================= -->
+      <section id="view-portfolio" class="view" aria-labelledby="portfolio-h" hidden>
+        <header class="page-head">
+          <div>
+            <p class="kicker">FINN · Saved in this browser only</p>
+            <h1 id="portfolio-h" class="serif">Portfolio</h1>
+          </div>
+        </header>
+
+        <div id="pf-summary"></div>
+
+        <form id="pf-form" class="search pf-add" autocomplete="off" role="search">
+          <label for="pf-input" class="field-label">Add an NSE company</label>
+          <div class="search-row">
+            <input id="pf-input" type="text" maxlength="30" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="Name or ticker, e.g. Bajaj Finance" aria-describedby="pf-help pf-msg" aria-controls="pf-results">
+            <button type="submit" id="pf-add" class="btn primary">Add</button>
+          </div>
+          <p id="pf-help" class="hint">Search by company name or type an exact NSE ticker. FINN confirms the company exists on NSE before adding it.</p>
+          <p id="pf-msg" class="pf-msg" role="status" aria-live="polite" hidden></p>
+          <div id="pf-results" class="pf-results" role="list" aria-label="Search results"></div>
+        </form>
+
+        <div id="pf-undo" class="pf-undo" role="status" aria-live="polite" hidden></div>
+        <div id="pf-list"></div>
+        <p class="foot">Your selection is stored only in this browser, under your demo display name. It does not sync to other devices or browsers, and the server never saves it. Not investment advice.</p>
+      </section>
+
+      <!-- ============================= RESEARCH ============================= -->
+      <section id="view-research" class="view" aria-labelledby="research-h" hidden>
+        <header class="page-head">
+          <div>
+            <p class="kicker">FINN · Annual report and earnings call</p>
+            <h1 id="research-h" class="serif">Research</h1>
+          </div>
+        </header>
+
+        <form id="r-form" class="search" autocomplete="off" role="search">
+          <label for="r-input" class="field-label">NSE ticker</label>
+          <div class="search-row">
+            <input id="r-input" type="text" inputmode="text" maxlength="20" autocapitalize="characters" autocorrect="off" spellcheck="false" list="r-options" placeholder="e.g. PIDILITIND" aria-describedby="r-help">
+            <button type="submit" id="r-go" class="btn primary">Research</button>
+          </div>
+          <datalist id="r-options"></datalist>
+          <p id="r-help" class="hint">Any NSE-listed company. Reads its latest annual report and earnings-call transcript; usually 2 to 4 minutes.</p>
+          <p id="r-input-error" class="inline-error" role="alert" hidden></p>
+        </form>
+
+        <div id="r-context"></div>
+        <div id="r-recents"></div>
+        <div id="r-run" aria-live="polite"></div>
+        <div id="r-result"></div>
+        <div id="r-guidance"></div>
+      </section>
+
+      <!-- ============================== PROFILE ============================== -->
+      <section id="view-profile" class="view" aria-labelledby="profile-h" hidden>
+        <header class="page-head">
+          <div>
+            <p class="kicker">FINN · Demo profile</p>
+            <h1 id="profile-h" class="serif">Profile</h1>
+          </div>
+        </header>
+        <div id="profile-body"></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="sheet" class="sheet" aria-labelledby="sheet-title">
+    <div class="sheet-inner">
+      <div class="sheet-head">
+        <h2 id="sheet-title" class="serif"></h2>
+        <button type="button" id="sheet-close" class="icon-btn" aria-label="Close">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div id="sheet-body"></div>
+    </div>
+  </dialog>
 
   <script src="/static/app.js"></script>
 </body>
