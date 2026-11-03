@@ -272,3 +272,22 @@ def test_slow_handler_is_logged_and_kept():
     assert timing.snapshot()["slow_handlers"][-1]["handler_s"] == 2.5
     timing.note_request("analyze", 100.0, 100.2)
     assert timing.snapshot()["slow_handlers"][-1]["handler_s"] == 2.5  # a fast request is not recorded
+
+
+# ------------------------------------------------------------------ CPU evidence in the timing data (round 8)
+
+def test_snapshot_reports_host_cpu_sources_without_failing_when_they_are_missing():
+    from finn.research import timing
+    snap = timing.snapshot()
+    assert "host_cpu" in snap and isinstance(snap["host_cpu"], dict)
+    assert timing._read_kv("/definitely/not/a/file") is None
+
+
+def test_stage_records_cpu_seconds_next_to_wall_seconds():
+    from finn.research import pipeline
+    tracker = pipeline.Tracker(None)
+    stage = tracker.start("extract:x")
+    sum(i * i for i in range(200000))
+    tracker.finish(stage, "ok")
+    record = tracker.public()[0]
+    assert record["seconds"] is not None and record["cpu_s"] >= 0

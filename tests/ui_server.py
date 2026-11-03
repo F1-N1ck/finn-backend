@@ -73,7 +73,7 @@ def install_fake_research():
     def runner(symbol, config, callback=None):
         return pipeline.analyze(symbol, config, callback=callback, session=fk.FakeSession(routes),
                                 resolver=fk.public_resolver, chat_fn=fk.make_fake_chat("good"),
-                                pacer=pacer.TokenPacer(10 ** 9))
+                                pacer=pacer.TokenPacer(10 ** 9, 0))
 
     os.environ["FINN_CACHE_DIR"] = "/tmp/finn_ui_cache"
     import shutil

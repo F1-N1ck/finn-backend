@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 
 import requests
@@ -108,12 +109,34 @@ def poll_once(base, job_id):
             info["instance"] = parsed.get("instance")
             if isinstance(parsed.get("server_timing"), dict):
                 st = parsed["server_timing"]
-                info["server_timing"] = {k: st.get(k) for k in ("server_time", "cpu_s", "rss_mb", "stage", "probe_events", "slow_handlers")}
+                info["server_timing"] = {k: st.get(k) for k in ("server_time", "cpu_s", "rss_mb", "stage", "probe_events", "slow_handlers", "host_cpu")}
         else:
             info["unexpected"] = "response has no 'status' field"
     except Exception:
         info["unexpected"] = "body is not JSON"
     return info, job
+
+
+def start_pinger(base, pings, stop, every_s=3.0):
+    """While a job runs, ask the cheap /healthz endpoint every few seconds from a second thread. If a poll hangs
+    but these answer at once, the stall is specific to that request (or its connection); if they hang too, the
+    whole instance (or the path to it) was unresponsive."""
+    def loop():
+        while not stop.is_set():
+            started = time.time()
+            entry = {"sent_at": round(started, 3)}
+            try:
+                response = requests.get(base + "/healthz", timeout=60)
+                entry["http"] = response.status_code
+                entry["headers_s"] = round(response.elapsed.total_seconds(), 2)
+            except requests.RequestException as error:
+                entry["network_error"] = type(error).__name__
+            entry["seconds"] = round(time.time() - started, 2)
+            pings.append(entry)
+            stop.wait(every_s)
+    thread = threading.Thread(target=loop, daemon=True, name="healthz-pinger")
+    thread.start()
+    return thread
 
 
 def run_one(base, ticker, max_wait_s, poll_s, report_hook):
@@ -150,6 +173,9 @@ def run_one(base, ticker, max_wait_s, poll_s, report_hook):
         return record, None
     record["job_id"] = job["job_id"]
     record["first_instance"] = job.get("instance")
+    record["pings"] = []
+    stop_pings = threading.Event()
+    start_pinger(base, record["pings"], stop_pings)
     bad_streak = 0
     final = job if job.get("status") != "running" else None
     while final is None and time.time() - started < max_wait_s:
@@ -176,6 +202,7 @@ def run_one(base, ticker, max_wait_s, poll_s, report_hook):
         bad_streak = 0
         if polled["status"] != "running":
             final = polled
+    stop_pings.set()
     record["wall_s"] = round(time.time() - started, 1)
     record["active_wall_s"] = round(record["wall_s"] - record.get("client_paused_s", 0), 1)
     if final is None:

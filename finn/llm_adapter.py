@@ -231,6 +231,25 @@ def _retry_after_seconds(response):
         return None
 
 
+RATE_LIMIT_RE = re.compile(r"on (?P<what>[a-z ]+?) \((?P<code>[A-Z]+)\):\s*Limit (?P<limit>\d+),\s*Used (?P<used>\d+),"
+                           r"\s*Requested (?P<requested>\d+)", re.I)
+RATE_LIMIT_NAMES = {"TPM": "tokens per minute", "OTPM": "output tokens per minute", "RPM": "requests per minute",
+                    "TPD": "tokens per day", "RPD": "requests per day"}
+
+
+def parse_rate_limit(message):
+    """Which limit a provider's 429 names, taken only from its own words, or None when it does not say.
+    Groq: 'Rate limit reached for model `m` ... on output tokens per minute (OTPM): Limit 1000, Used 625,
+    Requested 600. Please try again in 13.5s.' """
+    match = RATE_LIMIT_RE.search(message or "")
+    if not match:
+        return None
+    code = match.group("code").upper()
+    return {"code": code, "name": RATE_LIMIT_NAMES.get(code, match.group("what").lower()),
+            "limit": int(match.group("limit")), "used": int(match.group("used")),
+            "requested": int(match.group("requested"))}
+
+
 def strip_think(text):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 

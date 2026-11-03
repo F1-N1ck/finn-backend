@@ -428,7 +428,7 @@ def base_routes(kpit_pdfs, **overrides):
 def run_flow(routes, mode="good", calls=None, symbol="KPITTECH"):
     session = fk.FakeSession(routes)
     out = pipeline.analyze(symbol, Cfg(), session=session, resolver=fk.public_resolver,
-                           chat_fn=fk.make_fake_chat(mode, calls), pacer=pacer.TokenPacer(10 ** 9))
+                           chat_fn=fk.make_fake_chat(mode, calls), pacer=pacer.TokenPacer(10 ** 9, 0))
     return out, session
 
 
@@ -916,6 +916,9 @@ def test_script_survives_poll_without_status_and_saves_after_each_company(tmp_pa
             self._send(202, {"job_id": "abcdef012345", "status": "running", "instance": "i1"})
 
         def do_GET(self):
+            if self.path.startswith("/healthz"):  # the script's background ping is not a poll
+                self._send(200, {"ok": True})
+                return
             state["polls"] += 1
             if state["polls"] == 1:
                 self._send(502, None, raw=b"<html>Bad gateway gsk_SECRET123</html>")
@@ -963,7 +966,7 @@ def test_model_rate_limit_waits_once_then_succeeds(monkeypatch):
         if state["n"] == 1:
             raise llm_adapter.LLMRateLimited("Rate limited: tpm", status=429, retry_after=12.0)
         return {"text": '{"claims": []}', "usage": {"total_tokens": 100}, "latency_s": 0.1}
-    parsed, meta = pipeline.call_model(Cfg(), [{"role": "user", "content": "x"}], 100, pacer.TokenPacer(10 ** 9), chat,
+    parsed, meta = pipeline.call_model(Cfg(), [{"role": "user", "content": "x"}], 100, pacer.TokenPacer(10 ** 9, 0), chat,
                                        max_wait_s=60)
     assert state["n"] == 2 and slept == [13.0] and meta["paced_wait_s"] == 13.0
 
@@ -975,7 +978,7 @@ def test_model_rate_limit_too_long_is_reported_with_provider_detail():
         raise llm_adapter.LLMRateLimited("Rate limited: daily tokens used", status=429, retry_after=3000.0)
     tracker = pipeline.Tracker(None)
     section = pipeline.run_section("model:x", Cfg(), [{"role": "user", "content": "x"}], 100,
-                                   pacer.TokenPacer(10 ** 9), chat, lambda p: {"status": "ok"}, tracker)
+                                   pacer.TokenPacer(10 ** 9, 0), chat, lambda p: {"status": "ok"}, tracker)
     assert section["status"] == "unavailable" and section["reason"] == "model_rate_limited"
     assert "daily tokens" in section["provider_detail"] and section["retry_after_s"] == 3000.0
 
@@ -1539,3 +1542,139 @@ def test_pinned_adapter_over_a_real_tls_connection(tmp_path, monkeypatch):
         safe_fetch.make_session(lambda host: ["127.0.0.1"]).get(url, verify=cert, timeout=5)
     assert "dns_not_public" in str(error.value)
     server.shutdown()
+
+
+# ------------------------------------------------------------------ statement title kept in the passage (round 8)
+
+COFORGE_LIKE_PAGE = (
+    "Coforge Limited\n(CIN: L72100HR1992PLC128382)\nConsolidated Balance Sheet\n(All amounts in INR Mn unless otherwise stated)\n"
+    + "Property, plant and equipment 3 9,425 7,682\n" * 40
+    + "As per our report of even date\nPlace : Hyderabad\nDate : May 5, 2026\n"
+    + "Coforge Limited\n(CIN: L72100HR1992PLC128382)\nConsolidated Statement of Profit and Loss\n"
+      "(All amounts in INR Mn unless otherwise stated)\nThe accompanying notes are an integral part of the consolidated financial statements.\n"
+      "As per our report of even date\nFor and on behalf of Board of Directors\nChartered Accountants\n"
+      "Firm Registration No. 101049W/E300004\nDIN : 07080613\nPlace : Hyderabad\nDate : May 5, 2026\n"
+    + "Particulars\nNote\nYear ended \nMarch 31, 2026\nYear ended \nMarch 31, 2025\nContinuing Operations\nIncome\n"
+      "Revenue from operations\n17\n1,64,027\n1,20,733\nOther income\n18\n732\n1,647\nTotal income\n1,64,759\n1,22,380\n"
+      "Total expenses\n1,43,171\n1,09,419\nProfit before tax\n19,328\n12,961\nTotal tax expense\n2,583\n3,326\n"
+      "Profit for the year\n17,447\n9,361\nBasic earnings per share\n46.44\n24.60\n"
+)
+
+
+def test_statement_passage_starts_at_the_statement_title_not_in_the_middle_of_the_signature_block():
+    passages = sections.numbers_passages([{"page": 136, "text": COFORGE_LIKE_PAGE}])
+    text = passages[0]["text"]
+    assert text.startswith("Consolidated Statement of Profit and Loss")
+    assert "All amounts in INR Mn" in text and "Profit for the year\n17,447" in text
+    # the balance sheet title above is not pulled in
+    assert "Consolidated Balance Sheet" not in text
+
+
+def test_statement_start_falls_back_to_500_chars_above_the_table_when_no_title_is_near():
+    page = "Some filler line about the business.\n" * 60 + "Revenue from operations 100\nProfit for the year 10\n"
+    start = sections._statement_start(page)
+    assert start == page.lower().find("revenue from operations") - 500
+
+
+def test_statement_start_ignores_a_title_that_is_far_above_the_table():
+    far = "Consolidated Statement of Profit and Loss\n" + "x filler line of text here\n" * 300 + "Revenue from operations 100\n"
+    assert sections._statement_start(far) == far.lower().find("revenue from operations") - 500
+
+
+def test_checks_stay_strict_for_the_coforge_items_and_now_pass_because_the_words_are_in_the_passage():
+    passages = sections.numbers_passages([{"page": 136, "text": COFORGE_LIKE_PAGE}])
+    good = {"items": [{"metric": "Revenue from operations", "value": "1,64,027", "unit": "INR Mn",
+                       "period": "Year ended March 31, 2026", "scope": "consolidated", "source": "S1",
+                       "quote": "Revenue from operations\n17\n1,64,027\n1,20,733"}]}
+    rows = sections.check_number_items(good, passages)
+    assert rows[0]["auto_pass"] is True, rows[0]["problems"]
+    # same page with the title removed: the scope check must still reject it
+    stripped = COFORGE_LIKE_PAGE.replace("Consolidated Statement of Profit and Loss", "Statement").replace(
+        "(All amounts in INR Mn unless otherwise stated)", "").replace("consolidated", "group")
+    bare = [{"source_id": "S1", "page": 136, "char_start": 0, "text": stripped[stripped.find("Revenue from operations") - 100:],
+             "doc": "annual_report"}]
+    bad = sections.check_number_items(good, bare)
+    assert bad[0]["auto_pass"] is False and "scope_not_in_passage" in bad[0]["problems"]
+    assert "unit_not_in_passage" in bad[0]["problems"]
+
+
+def test_real_coforge_annual_report_page_keeps_title_and_unit():
+    path = "/tmp/pdfs3/finn_verify_COFORGE_AR.pdf"
+    if not os.path.exists(path):
+        pytest.skip("original Coforge annual report not present")
+    import pymupdf
+    doc = pymupdf.open(path)
+    page = {"page": 136, "text": doc[135].get_text()}
+    passages = sections.numbers_passages([page])
+    assert passages and passages[0]["page"] == 136
+    text = passages[0]["text"]
+    assert "Consolidated Statement of Profit and Loss" in text and "INR Mn" in text
+    assert "Profit for the year\n17,447" in text
+
+
+# ------------------------------------------------------------------ output-token budget (round 8)
+
+GROQ_OTPM_MESSAGE = ("Rate limited: Rate limit reached for model `qwen/qwen3.8-27b` in organization `org_01m0wc4vhhe5y9nmny86skeb1k` "
+                     "service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 625, Requested 600. "
+                     "Please try again in 13.5s.")
+
+
+def test_parse_rate_limit_reads_only_what_the_provider_said():
+    from finn import llm_adapter
+    got = llm_adapter.parse_rate_limit(GROQ_OTPM_MESSAGE)
+    assert got == {"code": "OTPM", "name": "output tokens per minute", "limit": 1000, "used": 625, "requested": 600}
+    assert llm_adapter.parse_rate_limit("Rate limited: slow down") is None
+    tpm = GROQ_OTPM_MESSAGE.replace("output tokens per minute (OTPM)", "tokens per minute (TPM)")
+    assert llm_adapter.parse_rate_limit(tpm)["code"] == "TPM"
+
+
+def test_run_section_reports_which_limit_and_hides_the_organisation_id():
+    from finn import llm_adapter
+
+    def chat(config, messages):
+        raise llm_adapter.LLMRateLimited(GROQ_OTPM_MESSAGE, status=429, retry_after=3000.0)
+    section = pipeline.run_section("model:x", Cfg(), [{"role": "user", "content": "x"}], 100,
+                                   pacer.TokenPacer(10 ** 9, 0), chat, lambda p: {"status": "ok"}, pipeline.Tracker(None))
+    assert section["rate_limit"]["code"] == "OTPM" and section["rate_limit"]["limit"] == 1000
+    assert "org_01m0" not in section["provider_detail"] and "org_…" in section["provider_detail"]
+
+
+def test_pacer_holds_back_a_call_that_would_exceed_the_output_budget_even_when_total_is_low():
+    clock = {"t": 1000.0}
+    slept = []
+
+    def fake_sleep(seconds):
+        slept.append(seconds)
+        clock["t"] = clock["t"] + seconds
+
+    p = pacer.TokenPacer(limit_per_minute=7000, output_limit_per_minute=1000)
+    p.record(1700, now=lambda: clock["t"], output_tokens=600)       # first call: 600 output tokens
+    assert p.wait_for(1500, sleep=fake_sleep, now=lambda: clock["t"], estimated_output=300) == 0   # 900 <= 1000
+    p.record(1500, now=lambda: clock["t"], output_tokens=455)       # second call: 455 -> 1055 used
+    waited = p.wait_for(1500, sleep=fake_sleep, now=lambda: clock["t"], estimated_output=600)
+    assert waited > 55 and len(slept) >= 1                              # total 3,200 + 1,500 is fine; output is not
+
+
+def test_pacer_output_budget_can_be_switched_off_and_unknown_output_counts_in_full():
+    p = pacer.TokenPacer(limit_per_minute=10 ** 9, output_limit_per_minute=0)
+    p.record(5000, output_tokens=5000)
+    assert p.wait_for(10, estimated_output=5000) == 0
+    q = pacer.TokenPacer(limit_per_minute=10 ** 9, output_limit_per_minute=1000)
+    q.record(900)                                                   # output unknown -> counted as 900
+    assert q.events[0][2] == 900
+
+
+def test_call_model_asks_the_pacer_for_output_budget_and_records_completion_tokens():
+    seen = {}
+
+    class Spy(pacer.TokenPacer):
+        def wait_for(self, estimated_tokens, **kwargs):
+            seen["wait"] = kwargs
+            return 0.0
+
+    spy = Spy(10 ** 9, 1000)
+
+    def chat(config, messages):
+        return {"text": '{"claims": []}', "usage": {"total_tokens": 900, "completion_tokens": 450}, "latency_s": 0.1}
+    pipeline.call_model(Cfg(), [{"role": "user", "content": "x"}], 600, spy, chat)
+    assert seen["wait"]["estimated_output"] == 600 and spy.events[0][1:] == (900, 450)

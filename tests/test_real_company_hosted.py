@@ -52,7 +52,7 @@ def small_ar():
 def run(symbol, html, routes):
     session = fk.FakeSession(routes)
     out = pipeline.analyze(symbol, Cfg(), session=session, resolver=fk.public_resolver,
-                           chat_fn=fk.make_fake_chat("good"), pacer=pacer.TokenPacer(10 ** 9))
+                           chat_fn=fk.make_fake_chat("good"), pacer=pacer.TokenPacer(10 ** 9, 0))
     return out, session
 
 

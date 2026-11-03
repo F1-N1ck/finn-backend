@@ -52,7 +52,8 @@ class Tracker:
 
     def start(self, name, note=None):
         timing.set_stage(name.split(":")[0])
-        record = {"name": name, "status": "running", "note": note, "seconds": None, "_t": time.monotonic()}
+        record = {"name": name, "status": "running", "note": note, "seconds": None, "_t": time.monotonic(),
+                  "_c": timing.cpu_seconds()}
         self.stages.append(record)
         self._tell()
         return record
@@ -62,6 +63,7 @@ class Tracker:
         if note is not None:
             record["note"] = note
         record["seconds"] = round(time.monotonic() - record["_t"], 2)
+        record["cpu_s"] = round(timing.cpu_seconds() - record["_c"], 2)  # this process, all threads; see timing.py
         self._tell()
 
     def elapsed(self):
@@ -314,7 +316,7 @@ def get_document(kind, candidates, company_name, session, resolver, tracker, lim
 
 def call_model(config, messages, max_tokens, pacer, chat_fn, max_wait_s=70.0):
     estimated = int(sum(len(m["content"]) for m in messages) / 3.0) + max_tokens  # providers count max_tokens too
-    waited = pacer.wait_for(estimated, max_wait_s=max_wait_s)
+    waited = pacer.wait_for(estimated, max_wait_s=max_wait_s, estimated_output=max_tokens)
     local = copy.copy(config)
     local.max_tokens = max_tokens
     try:
@@ -328,7 +330,7 @@ def call_model(config, messages, max_tokens, pacer, chat_fn, max_wait_s=70.0):
         waited = waited + pause + 1.0
         raw = chat_fn(local, messages)
     usage = raw.get("usage") or {}
-    pacer.record(usage.get("total_tokens") or estimated)
+    pacer.record(usage.get("total_tokens") or estimated, output_tokens=usage.get("completion_tokens"))
     parsed = grounded_qa.parse_answer_json(raw["text"])
     if not isinstance(parsed, dict):
         raise ValueError("model reply was not a JSON object")
@@ -468,8 +470,12 @@ def run_section(name, config, messages, max_tokens, pacer, chat_fn, builder, tra
     except llm_adapter.LLMError as error:
         tracker.finish(stage, "failed", "model: " + str(error.code))
         result = unavailable("model_" + str(error.code), "the model call failed; nothing was invented")
-        result["provider_detail"] = str(error)[:300]  # already stripped of the key by the adapter
+        # already stripped of the key by the adapter; the organisation id is not needed to read the message
+        result["provider_detail"] = re.sub(r"org_[A-Za-z0-9]+", "org_…", str(error))[:300]
         result["retry_after_s"] = getattr(error, "retry_after", None)
+        limit = llm_adapter.parse_rate_limit(str(error)) if getattr(error, "code", "") == "rate_limited" else None
+        if limit:
+            result["rate_limit"] = limit  # which limit the provider named, as it said it
         return result
     except ValueError:
         tracker.finish(stage, "failed", "model reply was not valid JSON")

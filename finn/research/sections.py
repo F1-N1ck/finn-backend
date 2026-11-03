@@ -201,13 +201,30 @@ def numbers_passages(ar_pages, max_chars=5000):
     return passages
 
 
+STATEMENT_HEADING_RE = re.compile(r"statement of (?:consolidated |standalone )?(?:profit|income|comprehensive income)", re.I)
+
+
 def _statement_start(text):
-    """When the income statement sits below a balance sheet on the same page, begin the passage just above
-    'Revenue from operations' so a long page is not cut off before the profit lines."""
-    index = text.lower().find("revenue from operations")
-    if index > 600:
-        return max(0, index - 500)
-    return 0
+    """Where the passage begins. When the income statement sits below a balance sheet on the same page, begin at
+    the statement's own title line (it carries 'Consolidated' or 'Standalone' and the unit, for example 'All amounts
+    in INR Mn'), so scope and unit are in front of the model and in front of the checks. Without a title close above
+    the table, begin just above 'Revenue from operations' so a long page is not cut off before the profit lines.
+    Seen on the Coforge annual report: starting 500 characters above the table skipped the title, the scope and
+    unit checks then (correctly) failed all three items."""
+    lowered = text.lower()
+    index = lowered.find("revenue from operations")
+    if index <= 600:
+        return 0
+    best = None
+    for match in STATEMENT_HEADING_RE.finditer(text[:index]):
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        line_end = len(text) if line_end == -1 else line_end
+        if line_end - line_start <= 90 and index - line_start <= 3000:
+            best = line_start
+    if best is not None:
+        return best
+    return max(0, index - 500)
 
 
 def outlook_passages(concall_pages, ar_pages=None):

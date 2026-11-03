@@ -98,10 +98,64 @@ def _rss_mb():
     return None
 
 
+def cpu_seconds():
+    """CPU time this process has used. A stage whose wall time is far above its CPU time was waiting (for the
+    network, the disk, or for the CPU to be given back to it), not computing."""
+    return _cpu()
+
+
+def _read_kv(path):
+    values = {}
+    try:
+        with open(path) as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+                    values[parts[0]] = int(parts[1])
+    except Exception:
+        return None
+    return values
+
+
+def host_cpu_limits():
+    """What the platform says about CPU sharing, so 'the process was starved of CPU' can be checked instead of
+    guessed. Every source may be missing (not Linux, no cgroup); missing keys are simply absent.
+      cgroup_cpu_stat  nr_periods / nr_throttled / throttled_usec (cgroup v2): time the container was held back
+      cgroup_cpu_max   the quota, for example '10000 100000' = 10 % of one CPU
+      psi_cpu_some     'some avg10/avg60/total' from /proc/pressure/cpu: share of time runnable work waited for CPU
+      steal_ticks      /proc/stat steal column: time the hypervisor ran something else
+    """
+    out = {}
+    stat = _read_kv("/sys/fs/cgroup/cpu.stat")
+    if stat:
+        out["cgroup_cpu_stat"] = {key: stat[key] for key in ("nr_periods", "nr_throttled", "throttled_usec", "usage_usec")
+                                  if key in stat}
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as handle:
+            out["cgroup_cpu_max"] = handle.read().strip()
+    except Exception:
+        pass
+    try:
+        with open("/proc/pressure/cpu") as handle:
+            for line in handle:
+                if line.startswith("some"):
+                    out["psi_cpu_some"] = line.strip()
+    except Exception:
+        pass
+    try:
+        with open("/proc/stat") as handle:
+            first = handle.readline().split()
+        if first and first[0] == "cpu" and len(first) > 8:
+            out["steal_ticks"] = int(first[8])
+    except Exception:
+        pass
+    return out
+
+
 def snapshot():
     with _lock:
         events = list(_events)
         slow = list(_slow_requests)
     return {"server_time": round(time.time(), 3), "uptime_s": round(time.time() - BOOTED_AT, 1),
             "cpu_s": round(_cpu(), 2), "rss_mb": _rss_mb(), "stage": _state["stage"],
-            "probe_events": events[-20:], "slow_handlers": slow[-10:]}
+            "probe_events": events[-20:], "slow_handlers": slow[-10:], "host_cpu": host_cpu_limits()}
