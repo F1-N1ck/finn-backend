@@ -763,17 +763,47 @@ function pollJob() {
     });
 }
 
+function skippedText(item) {
+  var parts = [(item.label || "listed document") + " on " + (item.host || "unknown host"),
+    item.state];
+  if (item.http_status) { parts.push("HTTP " + item.http_status); }
+  if (item.detail && item.detail.chars !== undefined) {
+    parts.push(item.detail.chars + " characters, " + item.detail.pages + " page(s)");
+  }
+  return parts.join(" · ");
+}
+
+function skippedNode(doc) {
+  var wrap = el("div");
+  var list = doc.skipped || [];
+  for (var i = 0; i < list.length; i++) {
+    wrap.appendChild(el("p", "note", "Not used: " + skippedText(list[i])));
+  }
+  return wrap;
+}
+
+function sourceText(doc) {
+  var src = doc.source || {};
+  if (src.kind === "company_website") {
+    return "Source: company website " + doc.host + ". " + (src.detail || "");
+  }
+  return "Source: exchange filing host " + doc.host;
+}
+
 function docNode(label, doc) {
   var box = el("div", "doc");
   if (doc.status !== "ok") {
     box.appendChild(el("b", null, label + ": not available"));
     box.appendChild(el("span", null, doc.reason || ""));
+    box.appendChild(skippedNode(doc));
     return box;
   }
   box.appendChild(el("b", null, doc.title));
   box.appendChild(el("span", null, "Date label: " + (doc.date_label || "not listed") +
     (doc.date_in_text ? " · call dated " + doc.date_in_text + " in the transcript" : "") +
     " · " + doc.host));
+  box.appendChild(document.createElement("br"));
+  box.appendChild(el("span", "note", sourceText(doc)));
   box.appendChild(document.createElement("br"));
   box.appendChild(safeLink(doc.url, "Open source PDF"));
   var chips = el("div", "chips");
@@ -785,13 +815,14 @@ function docNode(label, doc) {
   } else {
     chips.appendChild(el("span", "chip stale", "cached with brief · fetched " + doc.fetch.fetched_at));
   }
+  if (doc.source && doc.source.kind === "company_website") {
+    chips.appendChild(el("span", "chip warn", "company-hosted"));
+  }
   var ex = doc.extraction;
   chips.appendChild(el("span", ex.state === "ok" ? "chip" : "chip warn", "text: " + ex.state + " · " + ex.pages_extracted + "/" + ex.page_count + " pages"));
   box.appendChild(chips);
   if (doc.skipped && doc.skipped.length) {
-    var states = [];
-    for (var i = 0; i < doc.skipped.length; i++) { states.push((doc.skipped[i].label || "") + " " + doc.skipped[i].state); }
-    box.appendChild(el("p", "note", "Skipped newer candidate: " + states.join("; ")));
+    box.appendChild(skippedNode(doc));
   }
   return box;
 }
@@ -877,7 +908,7 @@ function sectionNode(title, section) {
     details.appendChild(el("summary", null, failed.length + " statement(s) failed the automatic check and are not shown as findings"));
     for (var k = 0; k < failed.length; k++) {
       var f = failed[k];
-      var line = (f.text || (f.metric + " " + f.value)) + " [" + (f.problems ? f.problems.join(", ") : "quote or numbers not in source") + "]";
+      var line = (f.text || (f.metric + " " + f.value)) + " [" + (f.problems && f.problems.length ? f.problems.join(", ") : "quote or numbers not in source") + "]";
       details.appendChild(el("p", "note", line));
     }
     box.appendChild(details);
@@ -922,6 +953,13 @@ function renderBrief(brief, job) {
   docs.appendChild(docNode("Annual report", brief.documents.annual_report));
   docs.appendChild(docNode("Earnings call", brief.documents.concall));
   box.appendChild(docs);
+  var checks = brief.host_checks || [];
+  for (var h = 0; h < checks.length; h++) {
+    var hc = checks[h];
+    if (!hc.allowed) {
+      box.appendChild(el("p", "note", "Transcript not fetched (" + hc.label + ", " + hc.host + "): " + hc.reason));
+    }
+  }
 
   box.appendChild(sectionNode("Business overview", brief.sections.overview));
   box.appendChild(sectionNode("Management outlook", brief.sections.outlook));

@@ -69,6 +69,21 @@ def post_analyze(base, body):
     return response, round(time.time() - started, 2), None
 
 
+def add_server_timing(info, response, sent_at):
+    """Split a poll into: send -> app first saw it | inside the handler | handler done -> client got the body.
+    The first and last parts mix network time with any clock difference between this computer and the server
+    (normally under a second), so only large values mean anything."""
+    try:
+        received = float(response.headers.get("X-Received-At"))
+        responded = float(response.headers.get("X-Responded-At"))
+    except (TypeError, ValueError):
+        return
+    info["x_received_at"] = received
+    info["x_responded_at"] = responded
+    info["split_s"] = {"before_app": round(received - sent_at, 2), "handler": round(responded - received, 2),
+                       "after_handler": round(info["t"] - responded, 2)}
+
+
 def poll_once(base, job_id):
     started = time.time()
     try:
@@ -77,7 +92,11 @@ def poll_once(base, job_id):
         return {"t": time.time(), "network_error": type(error).__name__, "seconds": round(time.time() - started, 2)}, None
     info = describe_response(response)
     info["t"] = time.time()
+    info["sent_at"] = round(started, 3)
     info["seconds"] = round(time.time() - started, 2)
+    info["headers_s"] = round(response.elapsed.total_seconds(), 2)  # request sent -> response headers parsed
+    info["body_bytes"] = len(response.content)
+    add_server_timing(info, response, started)
     job = None
     try:
         parsed = response.json()
@@ -87,6 +106,9 @@ def poll_once(base, job_id):
             info["stages"] = len(parsed.get("stages") or [])
             info["server_elapsed_s"] = parsed.get("elapsed_s")
             info["instance"] = parsed.get("instance")
+            if isinstance(parsed.get("server_timing"), dict):
+                st = parsed["server_timing"]
+                info["server_timing"] = {k: st.get(k) for k in ("server_time", "cpu_s", "rss_mb", "stage", "probe_events", "slow_handlers")}
         else:
             info["unexpected"] = "response has no 'status' field"
     except Exception:

@@ -559,16 +559,16 @@ def test_flow_oversized_pdf(kpit_pdfs, monkeypatch):
 
 def test_flow_untrusted_transcript_host_is_reported(kpit_pdfs):
     html = fixture_html().replace("https://www.bseindia.com/stockinfo/AnnPdfOpen.aspx?Pname=d07f9c52-5c5a-443b-b239-6acd5e94b97a.pdf",
-                                  "https://www.kpit.com/transcript.pdf").replace(
+                                  "https://files.unrelated-host.example/transcript.pdf").replace(
         "https://www.bseindia.com/stockinfo/AnnPdfOpen.aspx?Pname=70c85b6c-58e6-423f-9b32-50b17a948674.pdf",
-        "https://www.kpit.com/transcript2.pdf")
+        "https://files.unrelated-host.example/transcript2.pdf")
     routes = base_routes(kpit_pdfs)
     routes[SCREENER] = fk.FakeResponse(200, html.encode())
     out, session = run_flow(routes)
     brief = out["brief"]
     assert brief["documents"]["concall"]["status"] == "not_available"
     assert "host_not_trusted" in " ".join(brief["notes"])
-    assert not any("kpit.com" in url for url in session.requests)
+    assert not any("unrelated-host" in url for url in session.requests)
 
 
 def test_flow_discovery_failures_abort_with_clear_codes(kpit_pdfs):
@@ -1152,3 +1152,390 @@ def test_rupee_candidate_precheck():
     assert extract.RUPEE_CANDIDATE_RE.search("Revenue H 1,234 crores")
     assert extract.RUPEE_CANDIDATE_RE.search("EPS `64.01")
     assert not extract.RUPEE_CANDIDATE_RE.search("Hindustan Unilever has a heritage in India")
+
+
+# ------------------------------------------------------------------ round 7: company-hosted transcripts, host rules, no summaries
+
+from finn.research import hosts  # noqa: E402
+
+KPIT_COMPANY_CALL = "https://www.kpit.com/wp-content/uploads/2026/08/Q1-FY27-transcript.pdf"
+
+
+def company_html(call_url=KPIT_COMPANY_CALL, website_text="kpit.com", website_href="http://www.kpit.com"):
+    html = fixture_html().replace(CALL_URL, call_url)
+    return html.replace('<a href="http://www.kpit.com" target="_blank">kpit.com</a>',
+                        '<a href="' + website_href + '" target="_blank">' + website_text + '</a>')
+
+
+@pytest.mark.parametrize("host,domain", [
+    ("astralltd.com", "astralltd.com"), ("www.coforge.com", "coforge.com"), ("investors.coforge.com", "investors.coforge.com"),
+    ("d1y69b020rytqm.cloudfront.net", None), ("bucket.s3.amazonaws.com", None), ("co.in", None), ("10.0.0.1", None),
+    ("localhost", None), ("x.github.io", None), ("bit.ly", None), ("a_b.example.com", None), ("", None),
+])
+def test_site_domain(host, domain):
+    assert hosts.site_domain(host) == domain
+
+
+@pytest.mark.parametrize("domain,name,expected", [
+    ("astralltd.com", "Astral Ltd", True), ("kpit.com", "KPIT Technologies Ltd", True),
+    ("tataelxsi.com", "Tata Elxsi Ltd", True), ("tatamotors.com", "Tata Elxsi Ltd", False),
+    ("investors.coforge.com", "Coforge Ltd", True), ("twitter.com", "Astral Ltd", False),
+    ("pidilite.com", "Pidilite Industries Ltd", True), ("abc.co.in", "ABC India Ltd", False),
+])
+def test_name_matches_domain(domain, name, expected):
+    assert hosts.name_in_domain(domain, name) is expected
+
+
+def make_policy(name, website, home_html=None, home_state="ok"):
+    calls = {"n": 0}
+
+    def fetch_homepage(domain):
+        calls["n"] += 1
+        return {"state": home_state, "html": home_html, "seconds": 0.4}
+    return hosts.CompanyHostPolicy(name, website, fetch_homepage), calls
+
+
+def test_policy_listed_website_and_subdomain_are_allowed():
+    policy, calls = make_policy("Coforge Ltd", "https://www.coforge.com")
+    assert policy.check("investors.coforge.com")["allowed"] is True
+    assert policy.check("www.coforge.com")["basis"] == "listed_website"
+    assert calls["n"] == 0  # no network needed
+
+
+@pytest.mark.parametrize("host", ["coforge.com.evil.example", "notcoforge.com", "evil.example", "coforge.com@evil.example"])
+def test_policy_lookalikes_are_refused(host):
+    policy, _ = make_policy("Coforge Ltd", "https://www.coforge.com", home_html="<a href='https://evil.example/'>x</a>")
+    assert policy.check(host)["allowed"] is False
+
+
+def test_policy_second_domain_needs_link_and_name():
+    home = "<a href='https://astralltd.com/'>About Astral Group</a><a href='https://twitter.com/astral'>t</a>"
+    policy, calls = make_policy("Astral Ltd", "https://www.astralpipes.com", home_html=home)
+    decision = policy.check("www.astralltd.com")
+    assert decision["allowed"] and decision["basis"] == "listed_website_links_to_it" and decision["company_domain"] == "astralltd.com"
+    assert policy.check("astralltd.com")["allowed"] and calls["n"] == 1  # the home page is read once
+    assert policy.homepage["state"] == "ok"
+    # name matches but the listed website never links there: refused
+    policy2, _ = make_policy("Astral Ltd", "https://www.astralpipes.com", home_html="<a href='https://other.example/'>x</a>")
+    refused = policy2.check("www.astralltd.com")
+    assert refused["allowed"] is False and "does not link" in refused["reason"]
+    # linked but the name does not match: refused without reading the home page
+    policy3, calls3 = make_policy("Astral Ltd", "https://www.astralpipes.com", home_html="<a href='https://sisterco.com/'>x</a>")
+    assert policy3.check("sisterco.com")["allowed"] is False and calls3["n"] == 0
+
+
+def test_policy_shared_platform_is_refused_even_if_linked_and_named():
+    home = "<a href='https://astral.cloudfront.net/x'>x</a>"
+    policy, _ = make_policy("Astral Ltd", "https://www.astralpipes.com", home_html=home)
+    assert policy.check("astral.cloudfront.net")["allowed"] is False
+
+
+def test_policy_homepage_failure_is_reported():
+    policy, _ = make_policy("Astral Ltd", "https://www.astralpipes.com", home_html=None, home_state="timeout")
+    refused = policy.check("www.astralltd.com")
+    assert refused["allowed"] is False and "timeout" in refused["reason"]
+
+
+def test_policy_without_a_listed_website_refuses_everything():
+    policy, _ = make_policy("Astral Ltd", None)
+    assert policy.check("www.astralltd.com")["allowed"] is False
+    assert "no usable company website" in policy.check("www.astralltd.com")["reason"]
+
+
+def test_screener_website_needs_text_and_link_to_agree():
+    parsed = discover.parse_screener(fixture_html(), SCREENER)
+    assert parsed["website"] == "http://www.kpit.com"
+    swapped = fixture_html().replace('<a href="http://www.kpit.com" target="_blank">kpit.com</a>',
+                                     '<a href="http://www.evil.example" target="_blank">kpit.com</a>')
+    assert discover.parse_screener(swapped, SCREENER)["website"] is None
+
+
+def test_check_url_company_domain_boundaries():
+    assert safe_fetch.check_url("https://investors.coforge.com/a.pdf", "coforge.com") == (True, None)
+    assert safe_fetch.check_url("https://coforge.com/a.pdf", "coforge.com") == (True, None)
+    assert safe_fetch.check_url("https://evilcoforge.com/a.pdf", "coforge.com") == (False, "host_not_trusted")
+    assert safe_fetch.check_url("http://coforge.com/a.pdf", "coforge.com") == (False, "bad_url")
+    assert safe_fetch.check_url("https://coforge.com:8443/a.pdf", "coforge.com") == (False, "bad_url")
+    assert safe_fetch.check_url("https://coforge.com/a.pdf") == (False, "host_not_trusted")
+
+
+def test_company_fetch_redirect_inside_domain_ok_outside_blocked():
+    url = "https://www.coforge.com/a.pdf"
+    apex = "https://coforge.com/a.pdf"
+    routes = {url: fk.FakeResponse(302, b"", {"Location": apex}), apex: fk.FakeResponse(200, pdf_bytes())}
+    result, _ = do_fetch(routes, url=url, company_domain="coforge.com")
+    assert result["ok"]
+    routes = {url: fk.FakeResponse(302, b"", {"Location": "https://evil.example/a.pdf"})}
+    result, session = do_fetch(routes, url=url, company_domain="coforge.com")
+    assert result["state"] == "host_not_trusted" and result["host"] == "evil.example"
+    assert session.requests == [url]  # the redirect target was never requested
+
+
+def test_company_fetch_refuses_private_addresses_on_every_hop():
+    url = "https://www.coforge.com/a.pdf"
+    routes = {url: fk.FakeResponse(302, b"", {"Location": "https://internal.coforge.com/a.pdf"})}
+
+    def resolver(host):
+        return ["10.1.2.3"] if host == "internal.coforge.com" else ["104.18.0.1"]
+    result, session = do_fetch(routes, url=url, company_domain="coforge.com", resolver=resolver)
+    assert result["state"] == "dns_not_public" and session.requests == [url]
+    for bad in (["127.0.0.1"], ["169.254.169.254"], ["10.0.0.1"], ["192.168.1.1"], ["::1"], ["fd00::1"], ["100.64.0.1"],
+                ["104.18.0.1", "10.0.0.2"], [], ["not-an-ip"]):
+        result, session = do_fetch({url: fk.FakeResponse(200, pdf_bytes())}, url=url, company_domain="coforge.com",
+                                   resolver=lambda host, bad=bad: bad)
+        assert result["state"] == "dns_not_public" and session.requests == []
+
+
+def test_company_fetch_keeps_size_and_type_limits():
+    url = "https://www.coforge.com/a.pdf"
+    result, _ = do_fetch({url: fk.FakeResponse(200, pdf_bytes(pages=30))}, url=url, company_domain="coforge.com", max_bytes=500)
+    assert result["state"] == "too_large"
+    result, _ = do_fetch({url: fk.FakeResponse(200, b"<html>login</html>", {"Content-Type": "text/html"})}, url=url,
+                         company_domain="coforge.com")
+    assert result["state"] == "not_pdf"
+
+
+def test_connection_is_pinned_to_the_checked_public_address(monkeypatch):
+    seen = {}
+
+    def fake_create(address, timeout, source_address=None, socket_options=None):
+        seen["address"] = address
+        return "socket"
+    monkeypatch.setattr(safe_fetch.urllib3_connection, "create_connection", fake_create)
+    connection_class = type("C", (safe_fetch.PinnedHTTPSConnection,), {"resolver": staticmethod(lambda host: ["93.184.216.34"])})
+    assert connection_class("www.coforge.com", 443)._new_conn() == "socket"
+    assert seen["address"] == ("93.184.216.34", 443)
+    private_class = type("P", (safe_fetch.PinnedHTTPSConnection,), {"resolver": staticmethod(lambda host: ["10.0.0.7"])})
+    with pytest.raises(safe_fetch.NotPublicAddress):
+        private_class("www.coforge.com", 443)._new_conn()
+    session = safe_fetch.make_session(lambda host: ["10.0.0.7"])
+    pool_class = session.get_adapter("https://www.coforge.com/").poolmanager.pool_classes_by_scheme["https"]
+    assert issubclass(pool_class.ConnectionCls, safe_fetch.PinnedHTTPSConnection)
+
+
+def test_select_documents_company_host_decisions():
+    parsed = discover.parse_screener(company_html("https://files.unrelated-host.example/t.pdf"), SCREENER)
+    policy = hosts.CompanyHostPolicy(parsed["company_name"], parsed["website"], None)
+    chosen = discover.select_documents(parsed, today=time.strptime("2026-11-03", "%Y-%m-%d"), policy=policy)
+    assert [c["label"] for c in chosen["concall_candidates"]] == ["May 2026"]
+    assert chosen["concall_candidates"][0]["source"]["kind"] == "exchange"
+    assert chosen["host_checks"][0]["allowed"] is False and chosen["host_checks"][0]["host"] == "files.unrelated-host.example"
+    assert "host_not_trusted (files.unrelated-host.example)" in " ".join(chosen["notes"])
+    ok = discover.select_documents(discover.parse_screener(company_html(), SCREENER),
+                                   today=time.strptime("2026-11-03", "%Y-%m-%d"),
+                                   policy=hosts.CompanyHostPolicy("KPIT Technologies Ltd", "http://www.kpit.com", None))
+    first = ok["concall_candidates"][0]
+    assert first["label"] == "Aug 2026" and first["source"]["kind"] == "company_website"
+    assert first["source"]["company_domain"] == "kpit.com" and first["source"]["basis"] == "listed_website"
+    # an annual report on a company host is never accepted
+    parsed_ar = discover.parse_screener(fixture_html().replace(AR_URL, "https://www.kpit.com/ar.pdf"), SCREENER)
+    chosen = discover.select_documents(parsed_ar, today=time.strptime("2026-11-03", "%Y-%m-%d"),
+                                       policy=hosts.CompanyHostPolicy("KPIT Technologies Ltd", "http://www.kpit.com", None))
+    assert all("kpit.com/ar.pdf" not in (c.get("url") or "") for c in chosen["annual_report_candidates"])
+
+
+def test_flow_company_hosted_transcript_is_used_and_labelled(kpit_pdfs):
+    routes = base_routes(kpit_pdfs)
+    routes[SCREENER] = fk.FakeResponse(200, company_html().encode())
+    routes[KPIT_COMPANY_CALL] = fk.FakeResponse(200, kpit_pdfs["call"])
+    out, session = run_flow(routes)
+    brief = out["brief"]
+    doc = brief["documents"]["concall"]
+    assert doc["status"] == "ok" and doc["host"] == "www.kpit.com" and doc["url"] == KPIT_COMPANY_CALL
+    assert doc["source"]["kind"] == "company_website" and doc["source"]["basis"] == "listed_website"
+    assert doc["fetch"]["source"] == "fetched_now" and "July 29, 2026" in doc["date_in_text"]
+    assert doc["date_matches_label"] is True
+    assert brief["sections"]["outlook"]["status"] == "ok"
+    assert "company's own website (www.kpit.com)" in brief["sections"]["outlook"]["note"]
+    assert any("own website" in line for line in brief["limitations"])
+    assert brief["host_checks"][0]["allowed"] is True
+    referers = [h.get("Referer") for url, h in session.header_log if url == KPIT_COMPANY_CALL]
+    assert referers == ["https://kpit.com/"]
+    citation = brief["sections"]["outlook"]["claims"][0]["citation"]
+    assert citation["url"] == KPIT_COMPANY_CALL and citation["pdf_page"] >= 1
+
+
+def test_flow_company_hosted_second_domain_reads_the_home_page_once(kpit_pdfs, tmp_path, monkeypatch):
+    call = "https://www.kpit-investor-files.example/wp-content/q1.pdf"
+    html = company_html(call, website_text="kpitgroup.example", website_href="https://www.kpitgroup.example")
+    routes = base_routes(kpit_pdfs)
+    routes[SCREENER] = fk.FakeResponse(200, html.encode())
+    routes["https://kpitgroup.example/"] = fk.FakeResponse(
+        200, b"<html><a href='https://www.kpit-investor-files.example/'>Investors</a></html>")
+    routes[call] = fk.FakeResponse(200, kpit_pdfs["call"])
+    # name 'KPIT Technologies Ltd' vs domain label 'kpitinvestorfiles' : one starts with the other? no -> refused
+    older = "https://www.bseindia.com/stockinfo/AnnPdfOpen.aspx?Pname=70c85b6c-58e6-423f-9b32-50b17a948674.pdf"
+    routes[older] = fk.FakeResponse(200, kpit_pdfs["call"])
+    out, session = run_flow(routes)
+    assert out["brief"]["documents"]["concall"]["url"] == older
+    assert call not in session.requests
+    # the same layout with a domain whose name does match is accepted (fresh cache: discovery is cached per ticker)
+    monkeypatch.setenv("FINN_CACHE_DIR", str(tmp_path / "second"))
+    call2 = "https://www.kpit.com/wp-content/q1.pdf"
+    html2 = company_html(call2, website_text="kpitgroup.example", website_href="https://www.kpitgroup.example")
+    routes[SCREENER] = fk.FakeResponse(200, html2.encode())
+    routes["https://kpitgroup.example/"] = fk.FakeResponse(200, b"<html><a href='https://www.kpit.com/'>Investors</a></html>")
+    routes[call2] = fk.FakeResponse(200, kpit_pdfs["call"])
+    out, session = run_flow(routes)
+    doc = out["brief"]["documents"]["concall"]
+    assert doc["url"] == call2 and doc["source"]["basis"] == "listed_website_links_to_it"
+    assert session.requests.count("https://kpitgroup.example/") == 1
+    assert out["brief"]["company_website_page"]["state"] == "ok"
+
+
+@pytest.mark.parametrize("response,state", [
+    (lambda pdf: fk.FakeResponse(403), "inaccessible_http"),
+    (lambda pdf: fk.FakeResponse(404), "not_found"),
+    (lambda pdf: fk.FakeResponse(200, b"<html>blocked</html>", {"Content-Type": "text/html"}), "not_pdf"),
+    (lambda pdf: fk.FakeResponse(302, b"", {"Location": "https://evil.example/x.pdf"}), "host_not_trusted"),
+])
+def test_flow_company_hosted_failure_is_shown_and_falls_back(kpit_pdfs, response, state):
+    routes = base_routes(kpit_pdfs)
+    routes[SCREENER] = fk.FakeResponse(200, company_html().encode())
+    routes[KPIT_COMPANY_CALL] = response(None)
+    older = "https://www.bseindia.com/stockinfo/AnnPdfOpen.aspx?Pname=70c85b6c-58e6-423f-9b32-50b17a948674.pdf"
+    routes[older] = fk.FakeResponse(200, kpit_pdfs["call"])
+    out, session = run_flow(routes)
+    doc = out["brief"]["documents"]["concall"]
+    assert doc["status"] == "ok" and doc["url"] == older and doc["source"]["kind"] == "exchange"
+    skipped = doc["skipped"][0]
+    assert skipped["state"] == state and skipped["host"] == "www.kpit.com" and skipped["source_kind"] == "company_website"
+    assert "evil.example" not in " ".join(session.requests)
+    assert "could not be used" in out["brief"]["sections"]["outlook"]["note"]
+
+
+def test_flow_company_hosted_audio_notice_is_rejected_with_facts(kpit_pdfs):
+    notice = fk.make_pdf_from_pages([{"page": 1, "text": "Dear Sir, Sub: Audio Recording of Earnings Call. Link below."}])
+    routes = base_routes(kpit_pdfs)
+    html = company_html().replace('<a href="https://www.bseindia.com/stockinfo/AnnPdfOpen.aspx?Pname=70c85b6c-58e6-423f-9b32-50b17a948674.pdf"', '<a href="https://www.kpit.com/old.pdf"')
+    routes[SCREENER] = fk.FakeResponse(200, html.encode())
+    routes[KPIT_COMPANY_CALL] = fk.FakeResponse(200, notice)
+    routes["https://www.kpit.com/old.pdf"] = fk.FakeResponse(200, notice)
+    out, _ = run_flow(routes)
+    doc = out["brief"]["documents"]["concall"]
+    assert doc["status"] == "not_available"
+    assert [s["state"] for s in doc["skipped"]] == ["not_a_transcript", "not_a_transcript"]
+    assert doc["skipped"][0]["detail"]["pages"] == 1 and doc["skipped"][0]["host"] == "www.kpit.com"
+    assert out["brief"]["sections"]["outlook"]["status"] == "not_found"
+
+
+def test_flow_unlisted_website_blocks_company_hosted_files(kpit_pdfs):
+    html = company_html().replace('<a href="http://www.kpit.com" target="_blank">kpit.com</a>', "")
+    routes = base_routes(kpit_pdfs)
+    routes[SCREENER] = fk.FakeResponse(200, html.encode())
+    routes[KPIT_COMPANY_CALL] = fk.FakeResponse(200, kpit_pdfs["call"])
+    out, session = run_flow(routes)
+    assert KPIT_COMPANY_CALL not in session.requests
+    check = out["brief"]["host_checks"][0]
+    assert check["allowed"] is False and "no usable company website" in check["reason"]
+
+
+def test_company_file_size_cap_is_tighter_than_exchange_cap(kpit_pdfs, monkeypatch):
+    monkeypatch.setenv("FINN_RESEARCH_MAX_BYTES_COMPANY", "2000")
+    routes = base_routes(kpit_pdfs)
+    routes[SCREENER] = fk.FakeResponse(200, company_html().encode())
+    routes[KPIT_COMPANY_CALL] = fk.FakeResponse(200, kpit_pdfs["call"])
+    out, _ = run_flow(routes)
+    skipped = out["brief"]["documents"]["concall"]["skipped"]
+    assert skipped[0]["state"] == "too_large" and skipped[0]["source_kind"] == "company_website"
+
+
+# summaries and fiscal periods
+
+def test_period_tokens():
+    assert sections.period_tokens("Management expects H2 FY27 to beat 1H") == {"h2", "fy27", "h1"}
+    assert sections.period_tokens("2Q and Q2 and FY2026-27 and FY'26") == {"q2", "fy27", "fy26"}
+    assert sections.period_tokens("the second half of the year, 2027, Hall") == set()
+
+
+def test_claim_naming_a_period_the_quote_does_not_name_is_rejected():
+    passage = {"source_id": "S1", "doc": "concall", "page": 15, "speaker": "CFO", "role": "management",
+               "text": "Margins, as you know, the H2FY26 margins were at a certain level. We expect 2H to be better than 1H, "
+                       "it would imply that our revenues would be higher even on a Y-o-Y basis in H2."}
+    quote = "We expect 2H to be better than 1H"
+    good = {"claims": [{"text": "Management expects H2 to be better than H1.", "source": "S1", "quote": quote}]}
+    bad = {"claims": [{"text": "Management expects H2 FY26 to be better than H1.", "source": "S1", "quote": quote}]}
+    assert sections.check_text_claims(good, [passage])[0]["auto_pass"] is True
+    rows = sections.check_text_claims(bad, [passage])
+    assert rows[0]["auto_pass"] is False and rows[0]["periods_not_in_quote"] == ["fy26"]
+
+
+def test_text_section_has_no_summary_and_names_the_period_problem():
+    passage = {"source_id": "S1", "doc": "concall", "page": 3, "speaker": "CFO", "role": "management",
+               "text": "We expect margins to hold in Q3 and Q4 and 2H to be better."}
+    docs = {"concall": {"record": {"title": "T", "label": "Oct 2026", "url": "https://www.bseindia.com/x",
+                                   "date_label": "Oct 2026", "date_in_text": None}}}
+    parsed = {"summary": "H2 FY26 will outperform", "claims": [
+        {"text": "Margins hold in Q3 and Q4.", "source": "S1", "quote": "We expect margins to hold in Q3 and Q4"},
+        {"text": "Margins hold in Q1 FY27.", "source": "S1", "quote": "We expect margins to hold in Q3"}]}
+    section = pipeline.text_section(parsed, [passage], docs)
+    assert "summary" not in section and section["status"] == "ok"
+    assert [c["text"] for c in section["claims"]] == ["Margins hold in Q3 and Q4."]
+    assert any("period_not_in_quote" in p for p in section["failed_checks"][0]["problems"])
+
+
+def test_prompts_do_not_ask_for_a_summary():
+    for prompt in (sections.OVERVIEW_PROMPT, sections.OUTLOOK_PROMPT, sections.NUMBERS_PROMPT):
+        assert "summary" not in prompt
+    assert "never work out a period yourself" in sections.OUTLOOK_PROMPT
+
+
+def test_good_run_brief_has_no_summary_anywhere(kpit_pdfs):
+    out, _ = run_flow(base_routes(kpit_pdfs))
+    assert all("summary" not in section for section in out["brief"]["sections"].values())
+
+
+def test_speaker_list_with_titles_that_wrap_lines_and_continue_on_page_two():
+    page1 = {"page": 1, "text": "Page 1 of 9\n\"X Limited Q1 FY27 Earnings Conference Call\"\nMANAGEMENT: MR. SANDEEP ENGINEER -\n"
+             "CHAIRMAN AND MANAGING DIRECTOR -\nX LIMITED\n\nMR. HIRANAND SAVLANI - EXECUTIVE\nDIRECTOR & CHIEF FINANCIAL\nOFFICER - X LIMITED\n"}
+    page2 = {"page": 2, "text": "Page 2 of 9\nMR. KAIRAV PATEL - EXECUTIVE\nDIRECTOR - X LIMITED\n\nMODERATOR:\nMR. PRANAV MEHTA - EQUIRUS\nSECURITIES PRIVATE LIMITED\n"}
+    from finn import retrieval
+    roles = retrieval.speaker_roles([page1, page2])
+    assert roles == {"engineer": "management", "savlani": "management", "patel": "management"}
+    assert "mehta" not in roles
+
+
+def test_pinned_adapter_over_a_real_tls_connection(tmp_path, monkeypatch):
+    """A local HTTPS server with a throw-away certificate: the checked address is the one connected to, the
+    certificate is still verified against the host name, and a private resolution is refused at connect time."""
+    import http.server
+    import shutil
+    import ssl
+    import subprocess
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl not available")
+    key, cert = str(tmp_path / "k.pem"), str(tmp_path / "c.pem")
+    made = subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert,
+                           "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost", "-days", "1"],
+                          capture_output=True)
+    if made.returncode != 0:
+        pytest.skip("openssl could not make a certificate")
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "5")
+            self.end_headers()
+            self.wfile.write(b"%PDF-")
+
+        def log_message(self, *args):
+            pass
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = "https://localhost:%d/" % server.server_address[1]
+    checked = []
+
+    def pretend_public(host, resolver=None):
+        checked.append(host)
+        return ["127.0.0.1"]
+    monkeypatch.setattr(safe_fetch, "public_addresses", pretend_public)
+    response = safe_fetch.make_session().get(url, verify=cert, timeout=5)
+    assert response.status_code == 200 and response.content == b"%PDF-" and checked == ["localhost"]
+    monkeypatch.undo()
+    with pytest.raises(requests.exceptions.ConnectionError) as error:
+        safe_fetch.make_session(lambda host: ["127.0.0.1"]).get(url, verify=cert, timeout=5)
+    assert "dns_not_public" in str(error.value)
+    server.shutdown()

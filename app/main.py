@@ -10,11 +10,13 @@ Questions are a fixed list (no free-text prompts), which also protects the model
 The snapshot (text + cached answers) is read-only and ships with the repo.
 """
 
+import asyncio
 import hmac
 import os
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,9 +26,50 @@ from pydantic import BaseModel, ConfigDict
 
 from finn import budget, digest, grounded_qa, hostcheck, llm_adapter, prices, snapshot
 from finn.research import jobs as research_jobs
+from finn.research import timing as research_timing
 from finn.research import validate as research_validate
 
-app = FastAPI(title="FINN backend", docs_url=None, redoc_url=None, openapi_url=None)
+
+@asynccontextmanager
+async def lifespan(_app):
+    research_timing.start_thread_probe()
+    probe = asyncio.create_task(research_timing.loop_probe())
+    try:
+        yield
+    finally:
+        probe.cancel()
+
+
+app = FastAPI(title="FINN backend", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+
+
+class TimingMiddleware:
+    """Adds X-Received-At / X-Responded-At / Server-Timing to analysis responses (see finn/research/timing.py)."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope["path"].startswith("/api/analyze"):
+            await self.inner(scope, receive, send)
+            return
+        received = time.time()
+
+        async def send_with_timing(message):
+            if message["type"] == "http.response.start":
+                now = time.time()
+                headers = list(message.get("headers", []))
+                headers.append((b"x-received-at", ("%.3f" % received).encode()))
+                headers.append((b"x-responded-at", ("%.3f" % now).encode()))
+                headers.append((b"server-timing", ("app;dur=%d" % int((now - received) * 1000)).encode()))
+                message = dict(message, headers=headers)
+                research_timing.note_request("analyze", received, now)
+            await send(message)
+
+        await self.inner(scope, receive, send_with_timing)
+
+
+app.add_middleware(TimingMiddleware)
 
 origins = [o.strip() for o in os.environ.get("FINN_CORS_ORIGINS", "").split(",") if o.strip()]
 if origins:
@@ -234,6 +277,7 @@ def analyze_status(job_id: str):
         raise HTTPException(status_code=404, detail={
             "code": "unknown_job", "instance": research_jobs.INSTANCE,
             "message": "no such job on this server instance; the free server may have restarted, so submit again"})
+    job = dict(job, server_timing=research_timing.snapshot())
     return JSONResponse(job, headers={"Cache-Control": "no-store"})
 
 

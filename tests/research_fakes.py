@@ -24,10 +24,12 @@ class FakeSession:
     def __init__(self, routes):
         self.routes = routes
         self.requests = []
+        self.header_log = []
         self.headers = {}
 
     def get(self, url, stream=True, allow_redirects=False, timeout=None, headers=None):
         self.requests.append(url)
+        self.header_log.append((url, dict(headers or {})))
         route = self.routes.get(url)
         if route is None:
             return FakeResponse(404)
@@ -72,7 +74,7 @@ def make_fake_chat(mode="good", calls=None):
         first_id = sorted(passages)[0]
         text = passages[first_id]
         if mode == "not_stated":
-            out = {"not_stated": True, "summary": "", "claims": [], "items": []}
+            out = {"not_stated": True, "claims": [], "items": []}
         elif "selected reported numbers" in system:
             match = re.search(r"Revenue from operations\s*\n\s*\d+\s*\n\s*([\d,\.]+)", text)
             if match is None:
@@ -92,7 +94,7 @@ def make_fake_chat(mode="good", calls=None):
             snippet = snippet[snippet.find(" ") + 1:snippet.rfind(" ")]
             if mode == "hallucinate":
                 snippet = "management guided for 40% revenue growth next year"
-            out = {"not_stated": False, "summary": "fake summary",
+            out = {"not_stated": False,
                    "claims": [{"text": "claim: " + snippet, "source": first_id, "quote": snippet}]}
         return {"text": json.dumps(out), "usage": {"total_tokens": 900}, "latency_s": 0.2}
 

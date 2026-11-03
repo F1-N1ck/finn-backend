@@ -10,7 +10,7 @@ import time
 from html.parser import HTMLParser
 from urllib.parse import quote, urljoin
 
-from finn.research import safe_fetch
+from finn.research import hosts, safe_fetch
 
 SCREENER_BASE = "https://www.screener.in"
 MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -130,12 +130,18 @@ def parse_screener(html, base_url):
     match = re.search(r"BSE:\s*(\d{5,6})", page_text)
     if match:
         result["bse_code"] = match.group(1)
-    for anchor in parser.all_anchors:
+    for anchor in parser.all_anchors[:60]:  # the company's own website is linked near the top, before the documents
         href = anchor["href"]
-        if href.startswith("http") and "." in anchor["text"] and " " not in anchor["text"]:
-            if safe_fetch.host_of(href) not in safe_fetch.TRUSTED_HOSTS and "nseindia" not in href:
-                result["website"] = href
-                break
+        if not href.startswith(("http://", "https://")):
+            continue
+        shown = anchor["text"].strip().lower()
+        shown = shown[4:] if shown.startswith("www.") else shown
+        link_host = hosts.host_of(href)
+        link_host = link_host[4:] if link_host.startswith("www.") else link_host
+        # Screener prints the site as its own link text ("astralpipes.com"); require text and link to agree
+        if shown != "" and shown == link_host and hosts.site_domain(link_host) is not None:
+            result["website"] = href
+            break
 
     for item in parser.items:
         if item["section"] == "annual_reports":
@@ -221,12 +227,15 @@ def _months_old(entry, today):
     return (today.tm_year - entry["year"]) * 12 + (today.tm_mon - (entry.get("month") or 6))
 
 
-def select_documents(parsed, today=None, max_call_age_months=MAX_CALL_AGE_MONTHS):
+def select_documents(parsed, today=None, max_call_age_months=MAX_CALL_AGE_MONTHS, policy=None):
     """Choose candidate documents, newest first, and note what was skipped and why.
-    A transcript older than max_call_age_months is not used as 'management outlook': stale guidance is worse than none."""
+    A transcript older than max_call_age_months is not used as 'management outlook': stale guidance is worse than none.
+    `policy` (hosts.CompanyHostPolicy) lets a transcript on the company's own website through; without it only
+    the exchange hosts are accepted."""
     if today is None:
         today = time.localtime()
     notes = []
+    host_checks = []
     annual = sorted(parsed["annual_reports"], key=lambda e: e["year"], reverse=True)
     calls = []
     without_transcript = 0
@@ -242,33 +251,61 @@ def select_documents(parsed, today=None, max_call_age_months=MAX_CALL_AGE_MONTHS
         age = _months_old(entry, today)
         if age is not None and age > max_call_age_months:
             if not any(n.startswith("Skipped as too old") for n in notes):
-                notes.append("Skipped as too old (over " + str(max_call_age_months) + " months): newest accessible transcript is '"
-                             + str(entry["label"]) + "'. Newer calls may exist on company sites this app does not fetch from.")
+                notes.append("Skipped as too old (over " + str(max_call_age_months) + " months): newest transcript with a link is '"
+                             + str(entry["label"]) + "'.")
             continue
         calls.append(entry)
     if without_transcript > 0:
         notes.append(str(without_transcript) + " newer concall(s) are listed without a transcript link"
                      + (" (latest: " + newest_without + ")" if newest_without else "")
                      + "; using the newest call that has one.")
-    return {"annual_report_candidates": _trusted_first(annual, notes, "annual report"),
-            "concall_candidates": _trusted_first(calls, notes, "concall transcript"),
-            "notes": notes}
+    return {"annual_report_candidates": _trusted_first(annual, notes, "annual report", None, host_checks),
+            "concall_candidates": _trusted_first(calls, notes, "concall transcript", policy, host_checks),
+            "notes": notes, "host_checks": host_checks,
+            "company_website": (policy.listed_domain if policy is not None else None)}
 
 
-def _trusted_first(entries, notes, what):
-    """Keep at most 3 candidates; skip links on hosts we do not trust (and say so)."""
+def _trusted_first(entries, notes, what, policy, host_checks):
+    """Keep at most 3 candidates. A link on an exchange host is kept. A link on any other host is kept only for a
+    transcript, and only if the policy ties that host to the company; otherwise it is skipped and the reason is
+    recorded (notes for the page, host_checks for the brief)."""
     kept = []
     for entry in entries:
         url = entry.get("url") or entry.get("transcript_url")
+        host = safe_fetch.host_of(url)
         ok, code = safe_fetch.check_url(url)
-        if not ok:
+        if ok:
+            kept.append(dict(entry, source={"kind": "exchange", "host": host}))
+        elif code == "host_not_trusted" and policy is not None and what == "concall transcript":
+            decision = policy.check(host)
+            host_checks.append({"label": entry.get("label"), "url": url, "host": host, "allowed": decision["allowed"],
+                                "basis": decision.get("basis"), "detail": decision.get("detail"),
+                                "reason": decision.get("reason")})
+            if not decision["allowed"]:
+                notes.append("Skipped " + what + " '" + str(entry.get("label")) + "': host_not_trusted (" + host + "); "
+                             + decision["reason"] + ".")
+                continue
+            kept.append(dict(entry, source={"kind": "company_website", "host": host,
+                                            "company_domain": decision["company_domain"], "basis": decision["basis"],
+                                            "detail": decision["detail"], "listed_website": decision["listed_website"]}))
+        else:
             notes.append("Skipped " + what + " '" + str(entry.get("label")) + "': "
-                         + code + " (" + safe_fetch.host_of(url) + ")")
+                         + code + " (" + host + ")")
             continue
-        kept.append(entry)
         if len(kept) == 3:
             break
     return kept
+
+
+def homepage_fetcher(session, resolver):
+    """Reads the home page of the company's listed website, for the 'website links to it' check."""
+    def fetch_homepage(domain):
+        got = safe_fetch.fetch("https://" + domain + "/", session=session, max_bytes=1500000, total_timeout_s=12.0,
+                               read_timeout_s=8.0, resolver=resolver, company_domain=domain)
+        if got["ok"]:
+            return {"state": "ok", "html": got["data"].decode("utf-8", errors="replace"), "seconds": got["seconds"]}
+        return {"state": got["state"], "seconds": got["seconds"]}
+    return fetch_homepage
 
 
 def discover(symbol, session=None, resolver=None, total_timeout_s=40.0):
@@ -294,7 +331,9 @@ def discover(symbol, session=None, resolver=None, total_timeout_s=40.0):
     if parsed["nse_symbol"] is not None and parsed["nse_symbol"].upper() != symbol.upper():
         info["state"] = "ticker_mismatch"
         return info
-    selected = select_documents(parsed)
+    policy = hosts.CompanyHostPolicy(parsed["company_name"], parsed["website"], homepage_fetcher(session, resolver))
+    selected = select_documents(parsed, policy=policy)
+    selected["homepage_check"] = policy.homepage
     info["selection"] = selected
     if len(parsed["annual_reports"]) == 0 and len(parsed["concalls"]) == 0:
         info["state"] = "documents_not_listed"

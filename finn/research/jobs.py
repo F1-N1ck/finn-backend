@@ -10,7 +10,7 @@ import time
 import uuid
 
 from finn import llm_adapter
-from finn.research import pipeline
+from finn.research import pipeline, timing
 
 
 INSTANCE = uuid.uuid4().hex[:8]  # changes on every process start, so a client can see a restart
@@ -169,6 +169,7 @@ class ResearchService:
                 fallback["live_attempt_stages"] = outcome.get("stages")
                 brief = fallback
                 error = None
+        timing.set_stage("idle")
         with self.lock:
             job = self.jobs.get(job_id)
             if job is not None and job["status"] != "running":

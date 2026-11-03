@@ -236,3 +236,39 @@ def test_frequent_speaker_label_is_not_stripped_as_header():
     assert speakers.count("Analyst One") == 6
     for turn in turns:
         assert "KPIT Technologies Limited" not in turn["text"]
+
+
+# ------------------------------------------------------------------ poll timing evidence (round 7)
+
+def test_poll_carries_timing_headers_and_server_timing(monkeypatch):
+    from finn.research import jobs as research_jobs
+    configure_live(monkeypatch)
+    with TestClient(main.app) as client:
+        job = main.RESEARCH._new_job("KPITTECH", status="done", brief={"sections": {}}, running=False)
+        response = client.get("/api/analyze/" + job["job_id"])
+        assert response.status_code == 200
+        received = float(response.headers["x-received-at"])
+        responded = float(response.headers["x-responded-at"])
+        assert 0 <= responded - received < 5 and response.headers["server-timing"].startswith("app;dur=")
+        body = response.json()
+        timing = body["server_timing"]
+        assert set(timing) >= {"server_time", "cpu_s", "rss_mb", "stage", "probe_events", "slow_handlers"}
+        assert SECRET not in response.text and "http" not in json.dumps(timing)
+        other = client.get("/healthz")
+        assert "x-received-at" not in other.headers
+
+
+def test_probe_records_a_stall(monkeypatch):
+    from finn.research import timing
+    before = len(timing.snapshot()["probe_events"])
+    timing.record_event("thread", 3.2, 0.1)
+    events = timing.snapshot()["probe_events"]
+    assert len(events) == min(before + 1, 20) and events[-1]["lag_s"] == 3.2 and events[-1]["cpu_during_s"] == 0.1
+
+
+def test_slow_handler_is_logged_and_kept():
+    from finn.research import timing
+    timing.note_request("analyze", 100.0, 102.5)
+    assert timing.snapshot()["slow_handlers"][-1]["handler_s"] == 2.5
+    timing.note_request("analyze", 100.0, 100.2)
+    assert timing.snapshot()["slow_handlers"][-1]["handler_s"] == 2.5  # a fast request is not recorded

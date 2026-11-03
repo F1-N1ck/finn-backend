@@ -11,7 +11,7 @@ import re
 import time
 
 from finn import grounded_qa, llm_adapter, retrieval
-from finn.research import cache, discover, extract, pacer as pacer_module, safe_fetch, sections
+from finn.research import cache, discover, extract, pacer as pacer_module, safe_fetch, sections, timing
 
 DISCOVERY_TTL_S = 6 * 3600
 BRIEF_TTL_S = 24 * 3600
@@ -32,7 +32,9 @@ def _int_env(name, default):
 def limits():
     return {
         "max_bytes": _int_env("FINN_RESEARCH_MAX_BYTES", 35000000),
+        "max_bytes_company": _int_env("FINN_RESEARCH_MAX_BYTES_COMPANY", 15000000),  # a transcript is a few MB at most
         "download_s": _int_env("FINN_RESEARCH_DOWNLOAD_S", 75),
+        "company_download_s": _int_env("FINN_RESEARCH_COMPANY_DOWNLOAD_S", 45),
         "extract_s": _int_env("FINN_RESEARCH_EXTRACT_S", 80),
         "max_pages": _int_env("FINN_RESEARCH_MAX_PAGES", 600),
         "deadline_s": _int_env("FINN_RESEARCH_DEADLINE_S", 270),
@@ -49,6 +51,7 @@ class Tracker:
         self.started = time.monotonic()
 
     def start(self, name, note=None):
+        timing.set_stage(name.split(":")[0])
         record = {"name": name, "status": "running", "note": note, "seconds": None, "_t": time.monotonic()}
         self.stages.append(record)
         self._tell()
@@ -195,6 +198,15 @@ def looks_like_transcript(pages):
     return ok, {"chars": chars, "pages": len(pages), "turns": turns}
 
 
+def _skip_record(label, url, source, state, **extra):
+    record = {"label": label, "url": url, "host": safe_fetch.host_of(url), "source_kind": (source or {}).get("kind"),
+              "state": state}
+    for key, value in extra.items():
+        if value is not None:
+            record[key] = value
+    return record
+
+
 def get_document(kind, candidates, company_name, session, resolver, tracker, lim):
     """Try up to 2 candidates (newest first). Returns (doc, skipped). doc is None if none worked."""
     skipped = []
@@ -225,26 +237,38 @@ def get_document(kind, candidates, company_name, session, resolver, tracker, lim
             record["fetch"]["source"] = "disk_cache"
             tracker.finish(stage, "ok", "from disk cache; originally fetched " + str(record["fetch"].get("fetched_at")))
             return {"record": record, "pages": cached["pages"]}, skipped
-        if safe_fetch.host_of(url) == "www.bseindia.com":
+        source = entry.get("source") or {}
+        company_domain = source.get("company_domain")
+        host = safe_fetch.host_of(url)
+        if company_domain:
+            max_bytes = min(lim["max_bytes"], lim["max_bytes_company"])
+            wait_cap = lim["company_download_s"]
+            referer = "https://" + company_domain + "/"
+        else:
+            max_bytes = lim["max_bytes"]
+            wait_cap = lim["download_s"]
+            referer = BSE_HOME
+        if host == "www.bseindia.com":
             warm_up_bse(session, resolver)
-        got = safe_fetch.fetch(url, session=session, max_bytes=lim["max_bytes"],
-                               total_timeout_s=min(lim["download_s"], left - 20),
-                               expect_pdf=True, resolver=resolver, referer=BSE_HOME)
+        got = safe_fetch.fetch(url, session=session, max_bytes=max_bytes,
+                               total_timeout_s=min(wait_cap, left - 20),
+                               expect_pdf=True, resolver=resolver, referer=referer, company_domain=company_domain)
         first_try = None
         if not got["ok"] and got["state"] in TRANSIENT_STATES:
-            # BSE is sometimes slow to answer. Try the same (newest) document once more, with a longer wait,
+            # The host is sometimes slow to answer. Try the same (newest) document once more, with a longer wait,
             # before settling for an older one.
             left = lim["deadline_s"] - tracker.elapsed()
             if left > 90:
                 first_try = {"state": got["state"], "seconds": got["seconds"]}
                 SLEEP(2.0)
-                got = safe_fetch.fetch(url, session=session, max_bytes=lim["max_bytes"],
-                                       total_timeout_s=min(lim["download_s"], left - 40), read_timeout_s=35.0,
-                                       expect_pdf=True, resolver=resolver, referer=BSE_HOME)
+                got = safe_fetch.fetch(url, session=session, max_bytes=max_bytes,
+                                       total_timeout_s=min(wait_cap, left - 40), read_timeout_s=35.0,
+                                       expect_pdf=True, resolver=resolver, referer=referer, company_domain=company_domain)
         if not got["ok"]:
-            skipped.append({"label": label, "url": url, "state": got["state"],
-                            "tries": 2 if first_try else 1, "first_try": first_try})
-            tracker.finish(stage, "failed", "download: " + got["state"] + " after " + str(got["seconds"]) + " s"
+            skipped.append(_skip_record(label, url, source, got["state"], tries=2 if first_try else 1,
+                                        first_try=first_try, http_status=got.get("http_status"),
+                                        content_type=got.get("content_type"), blocked_url=got.get("url")))
+            tracker.finish(stage, "failed", "download from " + host + ": " + got["state"] + " after " + str(got["seconds"]) + " s"
                            + (" (second try; first was " + first_try["state"] + ")" if first_try else ""))
             continue
         fetched_bytes = got["bytes"]
@@ -254,20 +278,20 @@ def get_document(kind, candidates, company_name, session, resolver, tracker, lim
                                         budget_s=max(5, min(lim["extract_s"], left - 40)), max_rss_mb=lim["max_rss_mb"])
         got = None  # release the downloaded bytes before the next step
         if extracted["state"] not in ("ok", "partial"):
-            skipped.append({"label": label, "url": url, "state": extracted["state"]})
+            skipped.append(_skip_record(label, url, source, extracted["state"]))
             tracker.finish(stage, "failed", "extraction: " + extracted["state"] + " after " + str(extracted["seconds"]) + " s")
             continue
         pages = extracted["pages"]
         if kind == "concall":
             is_transcript, facts = looks_like_transcript(pages)
             if not is_transcript:
-                skipped.append({"label": label, "url": url, "state": "not_a_transcript", "detail": facts})
+                skipped.append(_skip_record(label, url, source, "not_a_transcript", detail=facts))
                 tracker.finish(stage, "failed", "not a transcript: " + str(facts["chars"]) + " characters, "
                                + str(facts["pages"]) + " page(s), " + str(facts["turns"]) + " speaker turns")
                 continue
         record = {
             "kind": kind, "title": title.strip(" -"), "label": label, "url": url,
-            "host": safe_fetch.host_of(url), "date_label": date_label,
+            "host": host, "source": source or {"kind": "exchange", "host": host}, "date_label": date_label,
             "date_in_text": find_call_date(pages) if kind == "concall" else None,
             "date_matches_label": None,
             "fetch": {"source": "fetched_now", "fetched_at": llm_adapter.now_iso(), "bytes": fetched_bytes,
@@ -364,28 +388,35 @@ def text_section(parsed, passages, docs, note=None):
         row = {"text": str(claim.get("text", "")), "auto_pass": check["auto_pass"],
                "checks": {"source_exists": check["source_exists"],
                           "quote_verbatim": check["quote_verbatim_in_source"],
-                          "numbers_missing_from_source": check["numbers_missing_from_cited_source"]},
+                          "numbers_missing_from_source": check["numbers_missing_from_cited_source"],
+                          "periods_not_in_quote": check.get("periods_not_in_quote", [])},
                "citation": None}
         if passage is not None:
             row["citation"] = _citation(docs[passage["doc"]], passage, str(claim.get("quote", "")))
         if check["auto_pass"]:
             shown.append(row)
         else:
+            problems = []
+            if not check["source_exists"]:
+                problems.append("source_missing")
+            if not check["quote_verbatim_in_source"]:
+                problems.append("quote_not_verbatim")
+            if check["numbers_missing_from_cited_source"]:
+                problems.append("number_not_in_source")
+            if check.get("periods_not_in_quote"):
+                problems.append("period_not_in_quote: " + ", ".join(check["periods_not_in_quote"]))
+            row["problems"] = problems
             rejected.append(row)
-    section = {"summary": str(parsed.get("summary", "")), "claims": shown, "items": [], "failed_checks": rejected,
+    section = {"claims": shown, "items": [], "failed_checks": rejected,
                "passages": _public_passages(passages), "note": note}
     if parsed.get("not_stated") or (len(shown) == 0 and len(rejected) == 0):
         section["status"] = "not_found"
         section["reason"] = "the retrieved passages do not state this"
-        section["summary"] = ""
     elif len(shown) == 0:
         section["status"] = "unverified"
         section["reason"] = "every statement failed the automatic check, so none is shown as a finding"
-        section["summary"] = ""
     else:
         section["status"] = "ok"
-        if len(rejected) > 0:
-            section["summary"] = ""  # the model's summary may rely on claims that failed
     return section
 
 
@@ -403,7 +434,7 @@ def numbers_section(parsed, passages, docs):
             shown.append(item)
         else:
             rejected.append(item)
-    section = {"summary": "", "claims": [], "items": shown, "failed_checks": rejected,
+    section = {"claims": [], "items": shown, "failed_checks": rejected,
                "passages": _public_passages(passages)}
     if parsed.get("not_stated") or (len(shown) == 0 and len(rejected) == 0):
         section["status"] = "not_found"
@@ -418,12 +449,12 @@ def numbers_section(parsed, passages, docs):
 
 def unavailable(reason, message):
     return {"status": "unavailable", "reason": reason, "message": message, "claims": [], "items": [],
-            "failed_checks": [], "passages": [], "summary": ""}
+            "failed_checks": [], "passages": []}
 
 
 def not_found(reason):
     return {"status": "not_found", "reason": reason, "claims": [], "items": [], "failed_checks": [],
-            "passages": [], "summary": ""}
+            "passages": []}
 
 
 def run_section(name, config, messages, max_tokens, pacer, chat_fn, builder, tracker, deadline_s=270):
@@ -456,7 +487,7 @@ def analyze(symbol, config, callback=None, session=None, resolver=None, chat_fn=
     """Run the flow for one validated ticker. Returns {"ok": True, "brief": ...} or {"ok": False, "error": ...}."""
     lim = limits()
     tracker = Tracker(callback)
-    session = session or safe_fetch.make_session()
+    session = session or safe_fetch.make_session(resolver)
     chat_fn = chat_fn or llm_adapter.chat
     pacer = pacer or PACER
 
@@ -521,6 +552,10 @@ def analyze(symbol, config, callback=None, session=None, resolver=None, chat_fn=
             older = "; ".join(str(x.get("label")) + " (" + str(x.get("state")) + ")" for x in skipped_calls)
             note = ("The newest listed transcript could not be used: " + older + ". This section is from the "
                     + str(docs["concall"]["record"].get("label")) + " call, an older call than the newest listed. " + note)
+        origin = docs["concall"]["record"].get("source") or {}
+        if origin.get("kind") == "company_website":
+            note = ("This transcript was downloaded from the company's own website (" + str(origin.get("host")) + "), not "
+                    "from an exchange filing. " + str(origin.get("detail")) + ". " + note)
         if docs["concall"]["record"].get("date_matches_label") is False:
             note = ("The date printed in the transcript (" + str(docs["concall"]["record"].get("date_in_text"))
                     + ") does not match the listed label (" + str(docs["concall"]["record"].get("label"))
@@ -566,6 +601,8 @@ def analyze(symbol, config, callback=None, session=None, resolver=None, chat_fn=
         "label": "LIVE brief | generated " + llm_adapter.now_iso() + " | model " + str(config.model),
         "generated_at": llm_adapter.now_iso(), "model": config.model, "prompt_version": sections.PROMPT_VERSION,
         "documents": documents, "sections": result_sections, "notes": notes,
+        "host_checks": selection.get("host_checks", []), "company_website": selection.get("company_website"),
+        "company_website_page": selection.get("homepage_check"),
         "limitations": limitations(documents, result_sections),
         "stages": tracker.public(), "total_seconds": round(tracker.elapsed(), 1), "disclaimer": DISCLAIMER,
     }
@@ -595,7 +632,7 @@ def _missing_reason(kind, selection, skipped):
             return "no recent transcript on a trusted host. " + too_old[0]
         listed_but_untrusted = [n for n in selection["notes"] if kind.split("_")[0] in n.lower() or "transcript" in n.lower()]
         if listed_but_untrusted:
-            return "none listed on a trusted host; " + listed_but_untrusted[0]
+            return "none usable: " + " ".join(listed_but_untrusted[:2])
         return "none listed with a usable link"
     states = [str(s.get("state")) for s in skipped]
     if "not_a_transcript" in states:
@@ -617,6 +654,10 @@ def limitations(documents, result_sections):
             items.append(kind.replace("_", " ") + " extracted only partly (" + str(doc["extraction"]["partial_reason"])
                          + "): " + str(doc["extraction"]["pages_extracted"]) + " of "
                          + str(doc["extraction"]["page_count"]) + " pages.")
+        origin = doc.get("source") or {}
+        if origin.get("kind") == "company_website":
+            items.append(kind.replace("_", " ") + " was downloaded from the company's own website (" + str(origin.get("host"))
+                         + "). Basis: " + str(origin.get("detail")) + ". Exchange filings were not used for this file.")
         if doc["skipped"]:
             items.append(kind.replace("_", " ") + ": a newer candidate was skipped, an older one was used ("
                          + ", ".join(str(s.get("state")) for s in doc["skipped"]) + ").")

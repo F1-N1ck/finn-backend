@@ -63,6 +63,10 @@ TITLE_MGMT_RE = re.compile(r"chief|\bceo\b|\bcfo\b|\bcoo\b|\bcto\b|managing dire
 TITLE_OUTSIDE_RE = re.compile(r"securities|research|analyst|capital|broking|equities|moderator|bank|asset management", re.I)
 LIST_HEADER_RE = re.compile(r"speakers|management|panelists|participants|company representatives|from the company", re.I)
 LIST_ENTRY_RE = re.compile(r"(?:MR|MS|MRS|DR|SHRI|SMT)\.?\s+([A-Z][A-Za-z\.\- ]{2,40}?)\s+[–\-—:]\s+([^\n]{3,160})", re.I)
+# The same list read as running text: a title can wrap onto the next line ("EXECUTIVE / DIRECTOR & CHIEF FINANCIAL /
+# OFFICER"), which the one-line pattern above cuts short. An entry ends where the next "MR./MS./DR. Name" starts.
+FLAT_ENTRY_RE = re.compile(r"(?:MR|MS|MRS|DR|SHRI|SMT)\.?\s+([A-Z][A-Za-z\.\- ]{2,40}?)\s+[–\-—:]\s+(.{3,240}?)"
+                           r"(?=\s(?:MR|MS|MRS|DR|SHRI|SMT)\.?\s+[A-Z]|\s*$)", re.I)
 
 
 def speaker_roles(pages):
@@ -72,7 +76,7 @@ def speaker_roles(pages):
     'Speakers:' list of 'Mr./Ms. First Last - Title' lines (HUL style). Investor-relations staff who read out
     questions are 'host', not management. Anything not listed stays an analyst."""
     roles = {}
-    for page in pages[:4]:
+    for index, page in enumerate(pages[:4]):
         text = page["text"]
         position = LIST_HEADER_RE.search(text)
         if position is None:
@@ -81,21 +85,32 @@ def speaker_roles(pages):
         stop = re.search(r"MODERATOR\s*:", block)
         if stop is not None:
             block = block[:stop.start()]
-        for match in LIST_ENTRY_RE.finditer(block):
-            words = match.group(1).split()
-            title = match.group(2)
-            if len(words) == 0:
-                continue
-            surname = words[-1].lower().strip(".")
-            if TITLE_OUTSIDE_RE.search(title):
-                continue
-            if re.search(r"investor relations", title, re.I):
-                roles[surname] = "host"
-            elif TITLE_MGMT_RE.search(title):
-                roles[surname] = "management"
+        _read_list_block(block, roles)
         if roles:
+            # a list that runs onto the next page (no MODERATOR line yet) continues there
+            if stop is None and index + 1 < len(pages):
+                more = pages[index + 1]["text"][:3000]
+                stop_next = re.search(r"MODERATOR\s*:", more)
+                _read_list_block(more[:stop_next.start()] if stop_next is not None else more, roles)
             break
     return roles
+
+
+def _read_list_block(block, roles):
+    flat_block = " ".join(block.split())
+    entries = [(m.group(1), m.group(2)) for m in LIST_ENTRY_RE.finditer(block)]
+    entries = entries + [(m.group(1), m.group(2)) for m in FLAT_ENTRY_RE.finditer(flat_block)]
+    for name_text, title in entries:
+        words = name_text.split()
+        if len(words) == 0:
+            continue
+        surname = words[-1].lower().strip(".")
+        if TITLE_OUTSIDE_RE.search(title):
+            continue
+        if re.search(r"investor relations", title, re.I):
+            roles[surname] = "host"
+        elif TITLE_MGMT_RE.search(title):
+            roles[surname] = "management"
 
 
 def management_surnames(pages):
